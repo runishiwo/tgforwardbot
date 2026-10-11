@@ -707,7 +707,7 @@ async function initWords() {
   const scope = currentScope();
   closeAllBatch();
   $('words-title-scope').textContent = GROUP_LABEL[scope];
-  $('words-file').textContent = '文件：keyword.' + scope + '.txt / blocked.' + scope + '.txt';
+  $('words-file').textContent = '文件：word/keyword.' + scope + '.txt / word/blocked.' + scope + '.txt';
   await loadScopes();
   wordSelection = { keyword: new Set(), blocked: new Set() };
   await Promise.all([wordLoad('keyword'), wordLoad('blocked')]);
@@ -820,9 +820,12 @@ async function wordRemoveSel(t) {
 
 /* ================= 词表批量添加 / 预览复制 ================= */
 const WORD_SPLIT_RE = /[;；,，、\n\r\t　]+/;
+const WORD_COMMENT_PREFIX = '##';
 function uniqWords(arr) { const s = new Set(), o = []; arr.forEach(w => { if (w && !s.has(w)) { s.add(w); o.push(w); } }); return o; }
 function splitWordInput(text) {
-  return uniqWords(String(text || '').split(WORD_SPLIT_RE).map(s => s.trim()).filter(Boolean));
+  // 与后端一致：以 ## 开头的整行视为注释并忽略，这样可直接粘贴整份词表文件内容
+  const lines = String(text || '').split(/\r?\n/).filter(l => !l.trim().startsWith(WORD_COMMENT_PREFIX));
+  return uniqWords(lines.join('\n').split(WORD_SPLIT_RE).map(s => s.trim()).filter(Boolean));
 }
 function updatePreview(t) {
   const all = wordCache[t] || [];

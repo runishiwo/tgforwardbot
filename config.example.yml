@@ -18,10 +18,12 @@ session_name: "session_session"
 # 不需要可留空或删掉该行。
 target_entity: 
 
-# ---- 词表文件（可选，仅用于首次初始化）----
-# 兼容旧版单表；新版的词表按「实时监控 / 手动转发」两类分开存放，
-# 由网页「词表管理」维护：keyword.monitor.txt / blocked.monitor.txt /
-# keyword.manual.txt / blocked.manual.txt。下面的文件在首次迁移时用于播种初始词条。
+# ---- 词表文件（可选，仅用于首次迁移播种）----
+# 实际词表按「实时监控 / 手动转发」两类分开存放在 word/ 目录，由网页「词表管理」维护：
+#   word/keyword.monitor.txt   word/blocked.monitor.txt
+#   word/keyword.manual.txt    word/blocked.manual.txt
+# 格式：每行一个词条，空行忽略，以 ## 开头的整行是注释。
+# 下面两项是旧版单表，仅在首次迁移时用于播种初始词条（可留空或删除）。
 keyword_file: "keyword.txt"
 blocked_file: "blocked.txt"
 

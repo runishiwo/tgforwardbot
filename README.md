@@ -67,6 +67,11 @@ ui/
 
 数据（运行时自动创建）：`data/tasks.db`（任务）、`data/stats.db`（统计）、`data/anchors.db`（锚点）、`data/recovery_cursors.db`（频道游标）、`data/word_scopes.json`（词表开关）、`log/`（日志）。
 
+词表集中存放在 **`word/`** 目录（`keyword.monitor.txt` / `blocked.monitor.txt` / `keyword.manual.txt` / `blocked.manual.txt`）：
+
+- **格式**：每行一个词条，空行忽略，**以 `##` 开头的整行是注释**；单个 `#` 开头视为普通词条（例如 `#tag`）。
+- 平时**无需手动改文件**——在网页「词表管理」里增删即可；旧版散落在项目根目录的词表会在首次启动时**自动迁移**到 `word/`。
+
 ---
 
 ## 🚀 快速开始（一键安装）

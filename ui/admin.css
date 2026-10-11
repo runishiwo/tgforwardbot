@@ -80,6 +80,8 @@
   .card h2{font-size:14.5px;margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .cardsub{color:var(--faint);font-size:12.5px;margin:0 0 14px;line-height:1.75}
   .cardsub b{color:var(--muted)}
+  .cardsub code{background:rgba(148,163,184,.15);padding:1px 5px;border-radius:4px;font-family:ui-monospace,Consolas,Menlo,monospace;font-size:12px;color:var(--muted)}
+  .cardsub .muted{color:var(--faint)}
   .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
   .spacer{flex:1}
 

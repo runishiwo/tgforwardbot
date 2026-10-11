@@ -1,6 +1,6 @@
 """词表：实时监控与手动转发**各用各的**，没有总表。
 
-- 文件：`keyword.<scope>.txt` / `blocked.<scope>.txt`，scope ∈ {monitor, manual}；
+- 文件：`word/keyword.<scope>.txt` / `word/blocked.<scope>.txt`，scope ∈ {monitor, manual}；
 - 每个大类两个开关：`use_keyword`（启用关键词过滤）、`use_blocked`（启用屏蔽词过滤）；
 - 两者都启用时**屏蔽词优先**：命中关键词但同时命中屏蔽词 → 不转发；
 - 单条任务可以自带关键词/屏蔽词，自带时以任务自己的为准。
@@ -22,6 +22,13 @@ WORD_SCOPES = ('monitor', 'manual')
 WORD_SCOPE_LABEL = {'monitor': '实时监控', 'manual': '手动转发'}
 
 
+WORD_COMMENT_PREFIX = '##'
+WORD_FILE_HEADER = (
+    '## 词表文件：每行一个词条，空行忽略；以 ## 开头的整行是注释。\n'
+    '## 单个 # 开头视为普通词条（例如 #tag）。可在网页「词表管理」批量维护。\n'
+)
+
+
 def dedup_words(items):
     seen = set()
     out = []
@@ -34,16 +41,27 @@ def dedup_words(items):
 
 
 def parse_word_lines(text):
-    """每行一个词条；空行忽略。不做 # 注释处理（关键词本身可以以 # 开头）。"""
+    """解析词表文本：每行一个词条，空行忽略，`##` 开头的整行是注释。
+
+    与 KeywordManager.load_keywords() 使用**同一套规则**，避免「网页里看到的」
+    与「实际用于过滤的」不一致。兼容历史遗留的 `\\#` 转义（表示词条以 `#` 开头），
+    行首的 `\\#` 会被还原为 `#`。
+    """
     out = []
     for line in str(text).splitlines():
         t = line.strip()
-        if not t:
+        if not t or t.startswith(WORD_COMMENT_PREFIX):
             continue
         if t.startswith('\\#'):
             t = t[1:]
         out.append(t)
     return out
+
+
+def word_file_text(words):
+    """把词条列表序列化为词表文件内容（带自述注释头，读回时会被忽略）。"""
+    body = '\n'.join(words)
+    return WORD_FILE_HEADER + (body + '\n' if body else '')
 
 
 class KeywordManager:
@@ -82,7 +100,8 @@ class KeywordManager:
             print_ts("词表文件 '%s' 不存在，使用空列表。" % self.file_path)
             return []
         with open(self.file_path, 'r', encoding='utf-8') as f:
-            return [line.strip() for line in f if line.strip()]
+            # 与网页读取共用 parse_word_lines：跳过空行/`##` 注释，统一处理 `\#`
+            return dedup_words(parse_word_lines(f.read()))
 
     async def snapshot(self):
         async with self._lock:
@@ -95,9 +114,13 @@ class WordScopeStore:
         self.seed_words = seeds or {}
         data_dir = os.path.join(base_dir, 'data')
         os.makedirs(data_dir, exist_ok=True)
+        # 词表统一放在 word/ 目录下（首次运行会自动把根目录的旧词表迁移进来）
+        self.word_dir = os.path.join(base_dir, 'word')
+        os.makedirs(self.word_dir, exist_ok=True)
         self.config_path = os.path.join(data_dir, 'word_scopes.json')
         self.migration_flag = os.path.join(data_dir, 'words_migrated_v2')
         self.config = self._load_config()
+        self._migrate_legacy_files()
         first_run = not os.path.exists(self.migration_flag)
         self.managers = {}
         for scope in WORD_SCOPES:
@@ -113,9 +136,25 @@ class WordScopeStore:
             except Exception:
                 pass
 
+    def _migrate_legacy_files(self):
+        """把旧版散落在项目根目录的 keyword.<scope>.txt / blocked.<scope>.txt 迁到 word/。"""
+        moved = 0
+        for scope in WORD_SCOPES:
+            for kind in ('keyword', 'blocked'):
+                old = os.path.join(self.base_dir, '%s.%s.txt' % (kind, scope))
+                new = self.path(scope, kind)
+                if os.path.isfile(old) and not os.path.exists(new):
+                    try:
+                        os.replace(old, new)
+                        moved += 1
+                    except Exception as exc:
+                        print_ts('词表迁移失败 %s -> %s: %s' % (old, new, exc))
+        if moved:
+            print_ts('已将 %d 个词表文件迁移到 word/ 目录' % moved)
+
     # ---------------- 文件与开关 ----------------
     def path(self, scope, kind):
-        return os.path.join(self.base_dir, '%s.%s.txt' % (kind, scope))
+        return os.path.join(self.word_dir, '%s.%s.txt' % (kind, scope))
 
     def manager(self, scope, kind):
         return self.managers[(scope, kind)]
@@ -131,13 +170,14 @@ class WordScopeStore:
         if os.path.isfile(path):
             try:
                 with open(path, 'r', encoding='utf-8') as f:
-                    if f.read().strip():
+                    # 只有「有效词条」才算非空；仅含 ## 注释头的模板仍视为空，允许播种
+                    if parse_word_lines(f.read()):
                         return
             except Exception:
                 return
         try:
             with open(path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(words) + '\n')
+                f.write(word_file_text(words))
             print_ts('已用原有词表初始化 %s：共 %d 条' % (os.path.basename(path), len(words)))
         except Exception as exc:
             print_ts('初始化 %s 失败: %s' % (os.path.basename(path), exc))
@@ -262,7 +302,7 @@ async def handle_words_post(request):
             drop = set(words)
             current = [w for w in current if w not in drop]
         with open(path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(current) + ('\n' if current else ''))
+            f.write(word_file_text(current))
         await mgr.reload_keywords()
     except Exception as exc:
         return json_response({'ok': False, 'error': str(exc)}, status=500)

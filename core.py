@@ -49,7 +49,8 @@ _WORD_SPLIT_RE = re.compile(r'[;；,，、\n\r\t　]+')
 def split_words(value):
     """把关键词/屏蔽词文本切成词条列表：支持换行或 ;；,，、 分隔；已是 list 则逐元素再切。
 
-    这样任务表单可以直接粘贴词表预览里 `;` 连接的文本（例如「特价; 秒杀，限时」）。
+    - 以 `##` 开头的整行视为注释（与词表文件规则一致），直接忽略；
+    - 这样任务表单可以直接粘贴词表预览里 `;` 连接的文本，甚至整份词表文件内容。
     """
     if value is None:
         return []
@@ -58,8 +59,12 @@ def split_words(value):
         for x in value:
             out.extend(split_words(x))
         return out
-    parts = _WORD_SPLIT_RE.split(str(value))
-    return [p.strip() for p in parts if p and p.strip()]
+    chunks = []
+    for line in str(value).splitlines():
+        if line.strip().startswith('##'):
+            continue
+        chunks.extend(_WORD_SPLIT_RE.split(line))
+    return [p.strip() for p in chunks if p and p.strip()]
 
 
 def read_lines(path):
