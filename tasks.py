@@ -529,8 +529,12 @@ def task_summary(task):
             '%s ~ %s' % (rng.get('start') or '最早', rng.get('end') or '现在')
             if (rng.get('start') or rng.get('end')) else '不限'))
         fl = cfg.get('filters') or {}
-        parts.append('关键词：%s' % ('启用' if fl.get('keyword', True) else '未启用'))
-        parts.append('屏蔽词：%s' % ('启用' if fl.get('blocked', True) else '未启用'))
+        kw = clean_words(cfg.get('keywords'))
+        bl = clean_words(cfg.get('blocked'))
+        parts.append('关键词：%s' % ('自带 %d 词' % len(kw) if kw
+                                   else ('启用' if fl.get('keyword', True) else '未启用')))
+        parts.append('屏蔽词：%s' % ('自带 %d 词' % len(bl) if bl
+                                   else ('启用' if fl.get('blocked', True) else '未启用')))
     keep = task.get('keep_days', RETENTION_DEFAULT)
     parts.append('日志保留：%s' % ('永久' if not keep else '%d 天' % keep))
     if task.get('anchor', True):

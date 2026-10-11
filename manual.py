@@ -163,7 +163,7 @@ class ManualForward:
         }
 
     async def start(self, sources, targets, start_date=None, end_date=None,
-                    keywords=None, limit=5000, name=None, filter_keyword=True,
+                    keywords=None, blocked=None, limit=5000, name=None, filter_keyword=True,
                     filter_blocked=True, keep_days=None, anchor=True, global_dedup=True):
         src_meta = norm_peers(sources)
         dst_meta = norm_peers(targets)
@@ -181,6 +181,7 @@ class ManualForward:
             'targets': dst_meta,
             'range': self._range_cfg(start, end),
             'keywords': [str(x).strip() for x in _as_word_list(keywords) if str(x).strip()][:50],
+            'blocked': [str(x).strip() for x in _as_word_list(blocked) if str(x).strip()][:50],
             'limit': limit,
             'filters': {'keyword': bool(filter_keyword), 'blocked': bool(filter_blocked)},
         }, keep_days=clamp_keep_days(keep_days), anchor=anchor, global_dedup=global_dedup)
@@ -206,8 +207,13 @@ class ManualForward:
         if not words and kw_on:
             words = [x.lower() for x in await self.bot.word_store.words(MANUAL_SCOPE, 'keyword')]
         filter_on = bool(words) or kw_on
-        blocked = ([x.lower() for x in await self.bot.word_store.words(MANUAL_SCOPE, 'blocked')]
-                   if bl_on else [])
+        # 屏蔽词：优先用任务自带的；没填再用「手动转发」大类词表（与关键词一致）。
+        blocked = [str(x).strip().lower() for x in (cfg.get('blocked') or []) if str(x).strip()]
+        if bl_on:
+            if not blocked:
+                blocked = [x.lower() for x in await self.bot.word_store.words(MANUAL_SCOPE, 'blocked')]
+        else:
+            blocked = []
         limit = max(1, min(int(cfg.get('limit') or 5000), 10000))
 
         self.store.set_state(record['id'], 'running')
@@ -256,6 +262,9 @@ class ManualForward:
         if fields.get('keywords') is not None:
             cfg['keywords'] = [str(x).strip() for x in _as_word_list(fields['keywords'])
                                if str(x).strip()][:50]
+        if fields.get('blocked') is not None:
+            cfg['blocked'] = [str(x).strip() for x in _as_word_list(fields['blocked'])
+                              if str(x).strip()][:50]
         if fields.get('limit') is not None:
             cfg['limit'] = max(1, min(int(fields['limit'] or 5000), 10000))
         fl = dict(cfg.get('filters') or {})
@@ -446,6 +455,7 @@ async def handle_manual_start(request):
             start_date=body.get('start_datetime') or body.get('start_date'),
             end_date=body.get('end_datetime') or body.get('end_date'),
             keywords=body.get('keywords'),
+            blocked=body.get('blocked'),
             limit=body.get('limit', 5000),
             name=body.get('name'),
             filter_keyword=_flag(body.get('filter_keyword'), True),
@@ -463,7 +473,7 @@ async def handle_manual_update(request):
     try:
         body = await request.json()
         fields = {k: body[k] for k in (
-            'name', 'sources', 'targets', 'start_datetime', 'end_datetime', 'keywords',
+            'name', 'sources', 'targets', 'start_datetime', 'end_datetime', 'keywords', 'blocked',
             'limit', 'filter_keyword', 'filter_blocked', 'keep_days', 'anchor', 'global_dedup')
             if k in body}
         result = await srv.manual.update(str(body.get('id', '')), **fields)

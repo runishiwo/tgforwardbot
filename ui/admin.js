@@ -313,7 +313,10 @@ async function openEdit(id) {
         <div class="field"><label>起始时间</label><input type="hidden" id="ed-start" value="${esc(r.start ? r.start.replace(' ', 'T') : '')}"><button type="button" class="dtbox" data-dt="ed-start" onclick="openPicker('ed-start')">${ r.start ? '<span class="val">' + esc(r.start) + '</span>' : '<span class="ph">点击选择起始时间</span>' }</button></div>
         <div class="field"><label>结束时间</label><input type="hidden" id="ed-end" value="${esc(r.end ? r.end.replace(' ', 'T') : '')}"><button type="button" class="dtbox" data-dt="ed-end" onclick="openPicker('ed-end')">${ r.end ? '<span class="val">' + esc(r.end) + '</span>' : '<span class="ph">点击选择结束时间</span>' }</button></div>
       </div>
-      <div class="field"><label>临时关键词（每行一个，或用 ; 分隔，留空 = 按大类开关）</label><textarea id="ed-keywords" rows="3" placeholder="每行一个，或用 ; 分隔（留空 = 按大类关键词开关判断）">${esc((cfg.keywords || []).join('\n'))}</textarea></div>
+      <div class="grid2">
+        <div class="field"><label>临时关键词（每行一个，或用 ; 分隔，留空 = 按大类词表）</label><textarea id="ed-keywords" rows="3" placeholder="每行一个，或用 ; 分隔（留空 = 用「手动转发」大类关键词表）">${esc((cfg.keywords || []).join('\n'))}</textarea></div>
+        <div class="field"><label>临时屏蔽词（每行一个，或用 ; 分隔，留空 = 按大类词表）</label><textarea id="ed-blocked" rows="3" placeholder="每行一个，或用 ; 分隔（命中即不转发，优先于关键词）">${esc((cfg.blocked || []).join('\n'))}</textarea></div>
+      </div>
       <div class="row">
         <label class="sw"><input type="checkbox" id="ed-fk" ${((cfg.filters || {}).keyword !== false) ? 'checked' : ''}><span>关键词过滤</span></label>
         <label class="sw"><input type="checkbox" id="ed-fb" ${((cfg.filters || {}).blocked !== false) ? 'checked' : ''}><span>屏蔽词过滤</span></label>
@@ -440,6 +443,7 @@ async function saveEdit(id) {
     base.start_datetime = $('ed-start').value || null;
     base.end_datetime = $('ed-end').value || null;
     base.keywords = $('ed-keywords').value;
+    base.blocked = $('ed-blocked').value;
     base.limit = parseInt($('ed-limit').value || '2000', 10);
     base.filter_keyword = $('ed-fk').checked;
     base.filter_blocked = $('ed-fb').checked;
@@ -692,6 +696,7 @@ async function startManual() {
         start_datetime: $('mf-start').value || null,
         end_datetime: $('mf-end').value || null,
         keywords: $('mf-keywords').value,
+        blocked: $('mf-blocked').value,
         limit: parseInt($('mf-limit').value || '2000', 10),
         keep_days: parseInt($('mf-keep').value || '30', 10) || 0,
         anchor: $('mf-anchor').checked,
@@ -699,7 +704,7 @@ async function startManual() {
       })
     });
     toast('任务已启动：' + d.task.name, 'ok');
-    $('mf-name').value = ''; $('mf-keywords').value = '';
+    $('mf-name').value = ''; $('mf-keywords').value = ''; $('mf-blocked').value = '';
     channelSel['mf-sources'] = new Set(); channelSel['mf-targets'] = new Set();
     renderChannelList('mf-sources'); renderChannelList('mf-targets');
     tasksCache = (tasksCache || []).filter(x => x.id !== d.task.id).concat([d.task]);

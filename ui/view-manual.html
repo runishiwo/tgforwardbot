@@ -2,7 +2,7 @@
     <section class="view" id="view-manual">
       <div class="card">
         <h2>发起手动转发</h2>
-        <p class="cardsub">按频道 + 时间范围扫描并转发历史消息。可以同时跑多条任务；留空关键词则按「手动转发」大类的词表开关判断。<a class="inline" href="javascript:void(0)" onclick="switchView('tasks')">去任务中心 →</a></p>
+        <p class="cardsub">按频道 + 时间范围扫描并转发历史消息。可以同时跑多条任务；留空关键词 / 屏蔽词则按「手动转发」大类词表判断。<a class="inline" href="javascript:void(0)" onclick="switchView('tasks')">去任务中心 →</a></p>
         <div class="field">
           <label>任务名称</label>
           <input type="text" id="mf-name" placeholder="留空自动生成，例如「手动转发 10-11 20:30」" style="max-width:420px">
@@ -38,9 +38,15 @@
             <div class="hint">例如只转 10 月 1 日 09:00 ~ 12:00 之间发布的消息。</div>
           </div>
         </div>
-        <div class="field">
-          <label>⑤ 临时关键词（每行一个，或用 ; 分隔，留空 = 按「手动转发」大类词表开关）</label>
-          <textarea id="mf-keywords" rows="3" placeholder="每行一个，或用 ; 分隔（留空 = 按大类关键词开关判断）"></textarea>
+        <div class="grid2">
+          <div class="field">
+            <label>⑤ 临时关键词（每行一个，或用 ; 分隔，留空 = 按「手动转发」大类词表）</label>
+            <textarea id="mf-keywords" rows="3" placeholder="每行一个，或用 ; 分隔（留空 = 用「手动转发」大类关键词表）"></textarea>
+          </div>
+          <div class="field">
+            <label>⑥ 临时屏蔽词（每行一个，或用 ; 分隔，留空 = 按「手动转发」大类词表）</label>
+            <textarea id="mf-blocked" rows="3" placeholder="每行一个，或用 ; 分隔（命中即不转发，优先于关键词）"></textarea>
+          </div>
         </div>
         <div class="grid3" style="margin-bottom:12px;align-items:flex-end">
           <div class="field" style="margin:0">
