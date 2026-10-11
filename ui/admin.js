@@ -357,14 +357,21 @@ function phRender() {
   }
   for (let d = 1; d <= daysInMo; d++) {
     const key = yr + '-' + pad2(mo + 1) + '-' + pad2(d);
-    cells += '<div class="ph-day' + (phSel === key ? ' sel' : '') + '" onclick="phPickDay(\'' + key + '\')">' + pad2(d) + '</div>';
+    cells += '<div class="ph-day' + (phSel === key ? ' sel' : '') + '" onclick="phPickDay(\'' + key + '\', this)">' + pad2(d) + '</div>';
   }
   const total = Math.ceil((startDow + daysInMo) / 7) * 7;
   let tail = 0;
   for (let i = startDow + daysInMo; i < total; i++) { tail++; cells += '<div class="ph-day mut">' + pad2(tail) + '</div>'; }
   $('ph-grid').innerHTML = cells;
 }
-function phPickDay(key) { phSel = key; phRender(); }
+function phPickDay(key, el) {
+  // 只更新选中样式，**不**重建 DOM：否则被点的节点会与文档脱钩，
+  // 导致下方 document 的「点击外部关闭」误判为点到外部而把选择框关掉。
+  phSel = key;
+  const grid = $('ph-grid');
+  if (grid) Array.from(grid.children).forEach(c => c.classList.remove('sel'));
+  if (el) el.classList.add('sel'); else phRender();
+}
 function phShift(d) { phView.m += d; if (phView.m < 0) { phView.m = 11; phView.y--; } else if (phView.m > 11) { phView.m = 0; phView.y++; } phRender(); }
 function phNow() { const n = new Date(); phView = { y: n.getFullYear(), m: n.getMonth() }; phSel = n.getFullYear() + '-' + pad2(n.getMonth() + 1) + '-' + pad2(n.getDate()); $('ph-hh').value = n.getHours(); $('ph-mm').value = n.getMinutes(); phRender(); }
 function phClear() { phSel = null; phRender(); }
@@ -407,6 +414,9 @@ function closePicker() { const pk = $('dt-picker'); if (pk) pk.style.display = '
 document.addEventListener('click', function (e) {
   const pk = $('dt-picker');
   if (!pk || pk.style.display !== 'block') return;
+  // composedPath 取的是派发时的路径快照，即使内部节点被重绘也不会误判
+  const path = (e.composedPath && e.composedPath()) || [];
+  if (path.indexOf(pk) !== -1) return;
   if (pk.contains(e.target)) return;
   if (e.target.closest && e.target.closest('.dtbox')) return;
   closePicker();
