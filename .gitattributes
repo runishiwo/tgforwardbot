@@ -1,0 +1,10 @@
+# 统一使用 LF，避免在 Linux 上运行 shell 脚本 / Python 时因 CRLF 出错
+* text=auto eol=lf
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.js   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
