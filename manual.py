@@ -189,8 +189,11 @@ class ManualForward:
         await self._spawn(record)
         return list_public([record])[0]
 
-    async def _spawn(self, record):
-        """按任务当前配置解析频道并启动协程。"""
+    async def _spawn(self, record, ignore_global=False):
+        """按任务当前配置解析频道并启动协程。
+
+        `ignore_global=True` 时本次运行忽略「跨任务去重」全局锚点（供「重新开始」强制重发）。
+        """
         cfg = record.get('config') or {}
         chats = await self.bot.resolve_peers([x['id'] for x in (cfg.get('sources') or [])])
         dests = await self.bot.resolve_peers([x['id'] for x in (cfg.get('targets') or [])])
@@ -225,7 +228,9 @@ class ManualForward:
                                           if record.get('anchor', True) else '关闭'))
         self._gate(record['id']).set()
         task = asyncio.create_task(self._run(record, chats, dests, start, end,
-                                            words, blocked, filter_on, limit))
+                                            words, blocked, filter_on, limit,
+                                            use_global=(bool(record.get('global_dedup', True))
+                                                        and not ignore_global)))
         self._tasks[record['id']] = task
         return task
 
@@ -319,6 +324,42 @@ class ManualForward:
             return {'ok': False, 'error': str(exc)}
         return {'ok': True}
 
+    async def restart(self, task_id):
+        """重新开始：清空该任务进度（锚点 + 统计），从头重新扫描并转发。
+
+        与「恢复」不同——恢复会按锚点跳过已转发过的消息；「重新开始」会先清空**该任务**的
+        锚点，并且本次运行忽略「跨任务去重」全局锚点，因此时间范围内命中的消息会全部
+        **重新转发一遍**（已转过的也会再发，可能产生重复）。运行中的任务会先被取消再重开。
+        """
+        record = self.store.get(task_id)
+        if not record or record['kind'] != MANUAL:
+            return {'ok': False, 'error': '任务不存在'}
+        # 1) 正在运行就先停掉当前协程（不等它自然结束）
+        task = self._tasks.get(task_id)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._tasks.pop(task_id, None)
+        self._pause.pop(task_id, None)
+        # 2) 清空进度：本任务锚点 + 统计 + 近期日志（全局锚点不动，避免影响其它任务）
+        self.bot.anchors.reset_task(task_id)
+        record['stats'] = dict(EMPTY_STATS)
+        record['recent'] = []
+        record['error'] = ''
+        self.store.set_state(task_id, 'running')
+        self.log.append(task_id, '任务已重新开始：已清空该任务的转发锚点与统计，将从头重新扫描并转发')
+        # 3) 重新扫描转发（忽略跨任务去重锚点，确保重发）
+        try:
+            await self._spawn(record, ignore_global=True)
+        except Exception as exc:
+            self.store.set_state(task_id, 'failed', error=str(exc))
+            self.log.append(task_id, '重新开始失败：%s' % exc)
+            return {'ok': False, 'error': str(exc)}
+        return {'ok': True}
+
     async def cancel(self, task_id):
         task = self._tasks.get(task_id)
         record = self.store.get(task_id)
@@ -351,10 +392,10 @@ class ManualForward:
         self.store.add_recent(record, line)
         return line
 
-    async def _run(self, record, chats, dests, start, end, words, blocked, filter_on, limit):
+    async def _run(self, record, chats, dests, start, end, words, blocked, filter_on, limit,
+                   use_global=True):
         task_id = record['id']
         anchor_on = bool(record.get('anchor', True))
-        use_global = bool(record.get('global_dedup', True))
         target_ids = {self.bot.peer_id(x) for x in dests}
         seen = set()
         anchor_skipped = 0
@@ -494,8 +535,10 @@ async def handle_manual_state(request):
             result = await srv.manual.pause(task_id)
         elif action == 'resume':
             result = await srv.manual.resume(task_id)
+        elif action == 'restart':
+            result = await srv.manual.restart(task_id)
         else:
-            result = {'ok': False, 'error': 'action 必须是 pause 或 resume'}
+            result = {'ok': False, 'error': 'action 必须是 pause / resume / restart'}
         return json_response(result, status=200 if result.get('ok') else 400)
     except Exception as exc:
         return json_response({'ok': False, 'error': str(exc)}, status=400)

@@ -240,6 +240,7 @@ function bindTaskActions(root, items) {
     } else {
       if (t.state === 'running') box.appendChild(mk('暂停', 'warn', () => manualState(id, 'pause')));
       else if (t.state === 'paused' || t.state === 'interrupted') box.appendChild(mk('恢复', 'ok', () => manualState(id, 'resume')));
+      box.appendChild(mk('重新开始', 'ghost', () => restartManual(id, t.name)));
     }
     box.appendChild(mk('编辑', 'ghost', () => openEdit(id)));
     box.appendChild(mk('删除', 'danger', () => dropTask(id, t.name)));
@@ -262,6 +263,14 @@ async function manualState(id, action) {
     toast(action === 'pause' ? '任务已暂停' : '任务已恢复运行', 'ok');
     loadTasks();
   } catch (e) { toast('操作失败：' + e.message, 'err'); }
+}
+async function restartManual(id, name) {
+  if (!confirm('「重新开始」会清空该任务的转发记录，时间范围内命中的消息会从头重新转发一遍（之前已转过的也会再发一次，可能重复）。确定对「' + (name || id) + '」重新开始？')) return;
+  try {
+    await api('/api/tasks/manual/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: 'restart' }) });
+    toast('任务已重新开始', 'ok');
+    loadTasks();
+  } catch (e) { toast('重新开始失败：' + e.message, 'err'); }
 }
 
 /* ================= 编辑任务 ================= */
@@ -487,8 +496,9 @@ async function loadTaskDetail(scroll) {
     if (t.kind === 'monitor') {
       if (t.state === 'running') acts.appendChild(mk('停用任务', 'warn', async () => { await monitorState(t.id, 'pause'); loadTaskDetail(); }));
       else if (t.state === 'paused') acts.appendChild(mk('恢复运行', 'ok', async () => { await monitorState(t.id, 'resume'); loadTaskDetail(); }));
-    } else if (t.state === 'running') {
-      acts.appendChild(mk('取消任务', 'warn', async () => { await cancelManual(t.id); loadTaskDetail(); }));
+    } else {
+      if (t.state === 'running') acts.appendChild(mk('取消任务', 'warn', async () => { await cancelManual(t.id); loadTaskDetail(); }));
+      acts.appendChild(mk('重新开始', 'ghost', async () => { await restartManual(t.id, t.name); loadTaskDetail(); }));
     }
     acts.appendChild(mk('编辑任务', 'ghost', async () => openEdit(t.id)));
     acts.appendChild(mk('删除任务', 'danger', async () => { await dropTask(t.id, t.name); }));
