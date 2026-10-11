@@ -1,0 +1,26 @@
+  </main>
+</div>
+<div id="toasts"></div>
+
+<script src="/admin.js"></script>
+<div id="dt-picker">
+  <div class="ph-head">
+    <button type="button" class="ph-nav" id="ph-prev" onclick="phShift(-1)">&lsaquo;</button>
+    <b id="ph-title"></b>
+    <button type="button" class="ph-nav" id="ph-next" onclick="phShift(1)">&rsaquo;</button>
+  </div>
+  <div class="ph-grid" id="ph-grid"></div>
+  <div class="ph-time">
+    <span>时间</span>
+    <input type="number" id="ph-hh" min="0" max="23" value="0">:
+    <input type="number" id="ph-mm" min="0" max="59" value="0">
+  </div>
+  <div class="ph-foot">
+    <button type="button" class="btn ghost sm" id="ph-now" onclick="phNow()">现在</button>
+    <button type="button" class="btn ghost sm" id="ph-clear" onclick="phClear()">清空</button>
+    <button type="button" class="btn sm" id="ph-ok" onclick="phApply()">确定</button>
+  </div>
+</div>
+
+</body>
+</html>

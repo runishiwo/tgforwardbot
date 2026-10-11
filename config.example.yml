@@ -1,0 +1,45 @@
+# ===================== TG 转发机器人 配置 =====================
+# 复制本文件为 config.yml 后填写自己的值：
+#   cp config.example.yml config.yml
+#
+# 其中 api_id / api_hash 需要在 https://my.telegram.org 申请（登录后 -> API development tools）。
+
+# ---- Telegram API 凭据（必填）----
+api_id: 123456                      # 你的 api_id（整数）
+api_hash: "your_api_hash_here"      # 你的 api_hash（字符串）
+
+# ---- Telegram 会话 ----
+# 首次启动时程序会要求输入手机号 / 验证码 / 二步密码完成登录，
+# 登录成功后会在当前目录生成 <session_name>.session 文件（内含登录凭据，切勿泄露 / 提交到仓库）。
+session_name: "session_session"
+
+# ---- 默认转发目标（可选）----
+# 没有在网页里为任务单独指定目的频道时，用这里的默认目标（频道/群组 id 或 @username）。
+# 不需要可留空或删掉该行。
+target_entity: 
+
+# ---- 词表文件（可选，仅用于首次初始化）----
+# 兼容旧版单表；新版的词表按「实时监控 / 手动转发」两类分开存放，
+# 由网页「词表管理」维护：keyword.monitor.txt / blocked.monitor.txt /
+# keyword.manual.txt / blocked.manual.txt。下面的文件在首次迁移时用于播种初始词条。
+keyword_file: "keyword.txt"
+blocked_file: "blocked.txt"
+
+# ---- 目标列表文件（可选）----
+target_file: "targets.txt"
+
+# ---- 运行参数 ----
+reload_interval: 60       # 秒，词表文件热加载间隔
+forward_interval: 2       # 秒，两条消息之间的转发间隔
+max_retries: 3            # 转发失败最大重试次数
+album_scan_limit: 50      # 相册 / 媒体组扫描深度
+log_cleanup_interval: 21600   # 秒，过期日志清理间隔（默认 6 小时）
+
+# ---- 目录 ----
+log_dir: "log"            # 日志目录（连接日志 + 每任务日志）
+media_tmp_dir: "media_tmp"  # 媒体临时目录
+
+# ---- Web 管理台 ----
+web_host: "0.0.0.0"       # 监听地址；只想本机访问可改为 127.0.0.1
+web_port: 8080            # 监听端口
+web_password: "change-me" # 管理台访问密码，请务必修改！

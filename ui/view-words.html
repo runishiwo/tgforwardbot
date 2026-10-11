@@ -1,0 +1,89 @@
+    <!-- ============ 词表 ============ -->
+    <section class="view" id="view-words">
+      <div class="card">
+        <h2>词表管理 · <span id="words-title-scope">实时监控</span></h2>
+        <p class="cardsub">实时监控与手动转发<strong>各用各的词表</strong>（没有总表）。关键词与屏蔽词可以分别启用或停用；两者都启用时<strong>屏蔽词优先</strong>——同时命中则一定不转发。保存后约 60 秒内自动生效（无需重启）。</p>
+
+        <div class="scopebox">
+          <div class="scopebox-l">
+            <label class="sw"><input type="checkbox" id="sw-keyword" onchange="saveScopes()"><span>启用关键词（命中才转发）</span></label>
+            <label class="sw"><input type="checkbox" id="sw-blocked" onchange="saveScopes()"><span>启用屏蔽词（命中即不转发，优先）</span></label>
+          </div>
+          <span class="counter" id="words-file"></span>
+        </div>
+        <div class="scopehint" id="scope-hint"></div>
+
+        <div class="subtabs">
+          <button class="btn ghost on" id="tab-kw" onclick="switchWordTab('keyword')">关键词（命中才转发）</button>
+          <button class="btn ghost" id="tab-bl" onclick="switchWordTab('blocked')">屏蔽词（命中就不转发，优先级更高）</button>
+        </div>
+
+        <div id="pane-keyword">
+          <div class="wordbar">
+            <input type="text" class="grow" id="kw-input" placeholder="输入关键词后回车或点添加" onkeydown="if(event.key==='Enter'){event.preventDefault();wordAdd('keyword')}">
+            <button class="btn" onclick="wordAdd('keyword')">添加</button>
+            <button class="btn ghost" onclick="openBatch('keyword')">批量添加</button>
+            <button class="btn ghost" onclick="wordToggleAll('keyword', this)">全选</button>
+            <button class="btn danger" onclick="wordRemoveSel('keyword')">删除所选</button>
+            <span class="counter" id="kw-status"></span>
+          </div>
+
+          <div class="batchbox" id="kw-batch" style="display:none">
+            <textarea id="kw-batch-text" rows="4"></textarea>
+            <div class="batch-tip" id="kw-batch-tip"></div>
+            <div class="batch-foot">
+              <div class="spacer"></div>
+              <button class="btn ghost sm" onclick="closeBatch('keyword')">关闭</button>
+              <button class="btn sm" id="kw-batch-go" onclick="batchAction('keyword')">追加到列表</button>
+            </div>
+          </div>
+
+          <div class="logbar"><input type="text" class="grow" id="kw-filter" placeholder="搜索筛选已有关键词…" oninput="wordRender('keyword')"></div>
+          <div class="wordlist" id="kw-list"></div>
+
+          <div class="previewbox">
+            <div class="preview-head">
+              <span>预览（<b>;</b> 分隔，可直接全选复制）</span>
+              <span class="counter" id="kw-preview-count"></span>
+              <div class="spacer"></div>
+              <button class="btn ghost sm" onclick="copyPreview('keyword')">复制全部</button>
+            </div>
+            <textarea id="kw-preview" rows="4" readonly spellcheck="false"></textarea>
+          </div>
+        </div>
+
+        <div id="pane-blocked" style="display:none">
+          <div class="wordbar">
+            <input type="text" class="grow" id="bl-input" placeholder="输入屏蔽词后回车或点添加" onkeydown="if(event.key==='Enter'){event.preventDefault();wordAdd('blocked')}">
+            <button class="btn" onclick="wordAdd('blocked')">添加</button>
+            <button class="btn ghost" onclick="openBatch('blocked')">批量添加</button>
+            <button class="btn ghost" onclick="wordToggleAll('blocked', this)">全选</button>
+            <button class="btn danger" onclick="wordRemoveSel('blocked')">删除所选</button>
+            <span class="counter" id="bl-status"></span>
+          </div>
+
+          <div class="batchbox" id="bl-batch" style="display:none">
+            <textarea id="bl-batch-text" rows="4"></textarea>
+            <div class="batch-tip" id="bl-batch-tip"></div>
+            <div class="batch-foot">
+              <div class="spacer"></div>
+              <button class="btn ghost sm" onclick="closeBatch('blocked')">关闭</button>
+              <button class="btn sm" id="bl-batch-go" onclick="batchAction('blocked')">追加到列表</button>
+            </div>
+          </div>
+
+          <div class="logbar"><input type="text" class="grow" id="bl-filter" placeholder="搜索筛选已有屏蔽词…" oninput="wordRender('blocked')"></div>
+          <div class="wordlist" id="bl-list"></div>
+
+          <div class="previewbox">
+            <div class="preview-head">
+              <span>预览（<b>;</b> 分隔，可直接全选复制）</span>
+              <span class="counter" id="bl-preview-count"></span>
+              <div class="spacer"></div>
+              <button class="btn ghost sm" onclick="copyPreview('blocked')">复制全部</button>
+            </div>
+            <textarea id="bl-preview" rows="4" readonly spellcheck="false"></textarea>
+          </div>
+        </div>
+      </div>
+    </section>

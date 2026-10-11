@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ForwardBot 登录</title>
+<style>
+  :root{
+    --bg:#0a0f1e; --panel:#141d33; --panel2:#1b2542; --border:#28324e; --border2:#37436a;
+    --text:#e8eefb; --muted:#8ea0bd; --faint:#61708f;
+    --accent:#38bdf8; --accent2:#0ea5e9; --accent3:#6366f1;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;display:flex;align-items:center;justify-content:center;
+    background:
+      radial-gradient(1100px 620px at 50% -15%, #1a2748 0%, transparent 58%),
+      radial-gradient(800px 500px at 100% 110%, #16213f 0%, transparent 55%),
+      var(--bg);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+    color:var(--text);-webkit-font-smoothing:antialiased;
+  }
+  .card{
+    width:100%;max-width:390px;margin:16px;padding:42px 38px 34px;
+    background:linear-gradient(180deg,rgba(20,29,51,.96),rgba(16,23,42,.96));
+    border:1px solid var(--border);border-radius:20px;
+    box-shadow:0 30px 70px -25px rgba(0,0,0,.85);
+    animation:rise .4s ease;
+  }
+  @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+  .logo{
+    width:56px;height:56px;margin:0 auto 20px;border-radius:16px;
+    background:linear-gradient(135deg,var(--accent),var(--accent3));
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 14px 30px -10px rgba(56,189,248,.7);
+  }
+  .logo svg{width:28px;height:28px}
+  h1{margin:0 0 6px;font-size:21px;text-align:center;letter-spacing:.3px}
+  .sub{margin:0 0 28px;text-align:center;color:var(--faint);font-size:13px}
+  label{display:block;margin-bottom:7px;font-size:12.5px;color:var(--muted)}
+  .wrap{position:relative;margin-bottom:18px}
+  input[type=password],input[type=text]{
+    width:100%;padding:12px 44px 12px 14px;font-size:15px;
+    background:#0b1224;color:var(--text);border:1px solid var(--border);
+    border-radius:11px;outline:none;transition:border-color .15s,box-shadow .15s;font-family:inherit;
+  }
+  input:focus{border-color:var(--accent2);box-shadow:0 0 0 3px rgba(14,165,233,.14)}
+  .eye{
+    position:absolute;right:7px;top:50%;transform:translateY(-50%);
+    background:none;border:none;cursor:pointer;padding:7px;color:var(--faint);border-radius:8px;
+  }
+  .eye:hover{color:var(--text);background:rgba(255,255,255,.05)}
+  button.go{
+    width:100%;padding:13px;font-size:15px;font-weight:700;letter-spacing:1px;
+    background:linear-gradient(135deg,var(--accent2),var(--accent3));color:#fff;
+    border:none;border-radius:11px;cursor:pointer;transition:filter .15s,transform .05s;font-family:inherit;
+  }
+  button.go:hover{filter:brightness(1.12)}
+  button.go:active{transform:translateY(1px)}
+  .err{
+    padding:10px 13px;margin:0 0 16px;border-radius:10px;
+    background:rgba(248,113,113,.12);border:1px solid rgba(248,113,113,.42);
+    color:#fca5a5;font-size:13px;text-align:center;
+  }
+  .err:empty{display:none}
+  .foot{margin-top:22px;text-align:center;color:var(--faint);font-size:11.5px;letter-spacing:.3px}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4Z"/></svg>
+    </div>
+    <h1>ForwardBot 控制台</h1>
+    <p class="sub">请输入访问密码以继续</p>
+    <div class="err">${error}</div>
+    <form method="post" action="/login">
+      <label for="password">访问密码</label>
+      <div class="wrap">
+        <input type="password" id="password" name="password" autofocus autocomplete="current-password" required>
+        <button type="button" class="eye" onclick="togglePw()" title="显示 / 隐藏密码">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+      <button type="submit" class="go">登 录</button>
+    </form>
+    <div class="foot">Telegram 消息转发 · 实时监听 + 手动转发</div>
+  </div>
+  <script>
+    function togglePw() {
+      var inp = document.getElementById('password');
+      inp.type = inp.type === 'password' ? 'text' : 'password';
+    }
+  </script>
+</body>
+</html>

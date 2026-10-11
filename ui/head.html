@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TG 转发机器人 · 控制台</title>
+<link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">TG</div>
+      <div><b>转发机器人</b><small>实时监控 · 手动转发</small></div>
+    </div>
+    <div class="nstatus"><span class="dot" id="conn-dot"></span><span id="conn-text">连接状态…</span></div>
+
+    <nav id="nav">
+      <button data-view="dashboard" class="active">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>概览</button>
+      <button data-view="tasks">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>任务中心</button>
+
+      <div class="nav-group" data-group="monitor">
+        <div class="nav-group-label"><span class="ngl-dot"></span>实时监控</div>
+        <button data-view="dashboard-monitor">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>实时监控概览</button>
+        <button data-view="monitor">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.6"/></svg>实时任务</button>
+        <button data-view="words">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/></svg>词表管理</button>
+      </div>
+
+      <div class="nav-group" data-group="manual">
+        <div class="nav-group-label"><span class="ngl-dot"></span>手动转发</div>
+        <button data-view="dashboard-manual">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>手动转发概览</button>
+        <button data-view="manual">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m13 2-3 7h5l-3 7"/><path d="M3 12h4M17 12h4M5 18h14"/></svg>发起转发</button>
+        <button data-view="words">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/></svg>词表管理</button>
+      </div>
+    </nav>
+
+    <div class="side-foot">
+      <a class="btn ghost sm" href="/telegram-login">Telegram 登录</a>
+      <a class="btn ghost sm" href="/logout">退出登录</a>
+    </div>
+  </aside>
+
+  <main>
+    <div class="head">
+      <div>
+        <div class="crumb" id="crumb"></div>
+        <h1 id="page-title">概览</h1>
+        <div class="sub" id="page-sub"></div>
+      </div>
+      <div class="row" id="head-actions"></div>
+    </div>
+

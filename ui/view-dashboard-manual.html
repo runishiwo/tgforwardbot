@@ -1,0 +1,23 @@
+    <!-- ============ 手动转发概览 ============ -->
+    <section class="view" id="view-dashboard-manual">
+      <div class="card">
+        <h2>手动转发 · 今日与总计</h2>
+        <p class="cardsub">只统计「手动转发」类任务的转发数据，按自然日累计，重启不丢。</p>
+        <div class="stat-grid" id="ov-man-stat"></div>
+      </div>
+      <div class="card">
+        <h2>近 7 天趋势</h2>
+        <div class="chart" id="ov-man-chart"></div>
+        <div class="legend"><span><i></i>转发成功</span><span><i class="b2"></i>转发失败</span></div>
+      </div>
+      <div class="card">
+        <h2>手动任务状态 <span class="counter" id="ov-man-state"></span></h2>
+        <div class="kv" id="ov-man-states"></div>
+      </div>
+      <div class="card">
+        <h2>手动任务列表 <span class="counter" id="ov-man-count"></span></h2>
+        <p class="cardsub">点任意一条可进入详情，看它自己的日志、统计与转发锚点，也可直接暂停 / 恢复 / 编辑。</p>
+        <div id="ov-man-tasks"><div class="empty">加载中…</div></div>
+      </div>
+    </section>
+

@@ -1,0 +1,14 @@
+[Unit]
+Description=TG Forward Bot Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tgforwardbot
+ExecStart=/opt/tgforwardbot/venv/bin/python /opt/tgforwardbot/main.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

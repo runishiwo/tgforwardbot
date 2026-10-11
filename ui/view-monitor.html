@@ -1,0 +1,65 @@
+    <!-- ============ 新建实时任务 ============ -->
+    <section class="view" id="view-monitor">
+      <div class="card">
+        <h2>新建实时监控任务</h2>
+        <p class="cardsub">每条任务独立运行、互不影响；可以同时建多条。来源留空表示<strong>监控全部频道</strong>。关键词/屏蔽词留空则沿用「实时监控」大类词表（可在词表管理里设置）。</p>
+        <div class="field">
+          <label>任务名称</label>
+          <input type="text" id="mt-name" placeholder="例如：科技频道 → 主频道" style="max-width:420px">
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label>来源频道（可多选，留空 = 全部频道）</label>
+            <div class="logbar">
+              <input type="text" class="grow" id="mt-sources-filter" placeholder="搜索频道…" oninput="filterChannels('mt-sources')">
+              <span class="counter" id="mt-sources-status"></span>
+              <button class="btn ghost sm" onclick="channelSelAll('mt-sources', this)">全选</button>
+              <button class="btn ghost sm" onclick="loadDialogs()">重新加载</button>
+            </div>
+            <div class="chlist" id="mt-sources"></div>
+            <div class="hint">不选任何频道 = 监听你的全部频道。</div>
+          </div>
+          <div class="field">
+            <label>目的频道（可多选，只列出你有发言权限的频道）</label>
+            <div class="logbar">
+              <input type="text" class="grow" id="mt-targets-filter" placeholder="搜索频道…" oninput="filterChannels('mt-targets')">
+              <span class="counter" id="mt-targets-status"></span>
+              <button class="btn ghost sm" onclick="channelSelAll('mt-targets', this)">全选</button>
+            </div>
+            <div class="chlist" id="mt-targets"></div>
+            <div class="hint">转发会发到这里的全部频道。</div>
+          </div>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label>关键词（每行一个，或用 ; 分隔，留空 = 用大类词表）</label>
+            <textarea id="mt-keywords" rows="4" placeholder="每行一个，或用 ; 分隔（留空则使用「实时监控」大类词表）"></textarea>
+            <div class="hint">可直接粘贴词表预览里 `;` 连接的文本，例如「特价; 秒杀，限时」。</div>
+          </div>
+          <div class="field">
+            <label>屏蔽词（每行一个，或用 ; 分隔，留空 = 用大类词表）</label>
+            <textarea id="mt-blocked" rows="4" placeholder="每行一个，或用 ; 分隔（命中即不转发，优先于关键词）"></textarea>
+          </div>
+        </div>
+        <div class="cardsub" style="margin:2px 0 6px;color:var(--muted)">高级设置</div>
+        <div class="grid3" style="align-items:flex-end">
+          <div class="field" style="margin:0">
+            <label>日志保留天数</label>
+            <input type="number" id="mt-keep" min="0" max="3650" value="30" style="max-width:160px">
+            <div class="hint">0 = 永久保留；默认 30 天，超过的日志会自动清理。</div>
+          </div>
+          <label class="sw"><input type="checkbox" id="mt-anchor" checked><span>启用转发锚点去重</span></label>
+          <label class="sw"><input type="checkbox" id="mt-gdedup" checked><span>跨任务去重（同一条源消息只转一次）</span></label>
+        </div>
+        <div class="row">
+          <button class="btn" id="mt-create" onclick="createMonitor(false)">创建并开始监控</button>
+          <button class="btn ghost" onclick="createMonitor(true)">创建为已停用</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>我的实时任务 <span class="counter" id="mt-count"></span></h2>
+        <div id="mt-list"><div class="empty">加载中…</div></div>
+      </div>
+    </section>
+

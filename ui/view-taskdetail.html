@@ -1,0 +1,37 @@
+    <!-- ============ 任务详情 ============ -->
+    <section class="view" id="view-taskdetail">
+      <div class="card">
+        <h2 id="dt-name">任务详情</h2>
+        <p class="cardsub" id="dt-summary">—</p>
+        <div class="row" id="dt-acts"></div>
+      </div>
+      <div class="card" id="dt-stats-card">
+        <h2>统计</h2>
+        <div class="kv" id="dt-stats"></div>
+      </div>
+
+      <div class="card" id="dt-edit-card" style="display:none">
+        <h2>编辑任务</h2>
+        <p class="cardsub">修改配置后保存。实时监控任务即时生效；手动转发任务需先暂停再编辑。</p>
+        <div id="dt-edit"></div>
+      </div>
+
+      <div class="card" id="dt-log-card">
+        <h2>该任务日志</h2>
+        <div class="logbar">
+          <input type="text" class="grow" id="dt-q" placeholder="在日志里搜索…" oninput="renderDetailLog()">
+          <label class="counter"><input type="checkbox" id="dt-follow" checked> 自动刷新</label>
+          <span class="counter" id="dt-logcount"></span>
+          <button class="btn ghost sm" onclick="loadTaskDetail(true)">刷新</button>
+        </div>
+        <pre class="logpre" id="dt-log"></pre>
+      </div>
+
+      <div class="card" id="dt-anchor-card">
+        <h2>转发锚点（按源频道去重）</h2>
+        <p class="cardsub">已按源频道记录转发过的消息，重启 / 重复扫描 / 跨任务都不会重复转发。需要强制重发时可重置。</p>
+        <div class="kv" id="dt-anchors"></div>
+        <div class="row" id="dt-anchor-acts" style="margin-top:12px"></div>
+      </div>
+    </section>
+

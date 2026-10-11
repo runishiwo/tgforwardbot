@@ -1,0 +1,25 @@
+    <!-- ============ 任务中心 ============ -->
+    <section class="view" id="view-tasks">
+      <div class="card">
+        <h2>全部任务</h2>
+        <p class="cardsub">实时监控任务与手动转发任务都在这里。每条任务都能点进详情，看它自己的日志与统计。</p>
+        <div class="filters">
+          <button class="btn ghost sm on" data-kind="" onclick="setTaskKind(this,'')">全部</button>
+          <button class="btn ghost sm" data-kind="monitor" onclick="setTaskKind(this,'monitor')">实时监控</button>
+          <button class="btn ghost sm" data-kind="manual" onclick="setTaskKind(this,'manual')">手动转发</button>
+          <span class="spacer"></span>
+          <span class="counter" id="tasks-count"></span>
+          <button class="btn ghost sm" onclick="loadTasks()">刷新</button>
+        </div>
+        <div class="filters">
+          <button class="btn ghost sm on" data-state="" onclick="setTaskState(this,'')">全部状态</button>
+          <button class="btn ghost sm" data-state="running" onclick="setTaskState(this,'running')">运行中</button>
+          <button class="btn ghost sm" data-state="paused" onclick="setTaskState(this,'paused')">已停用</button>
+          <button class="btn ghost sm" data-state="done" onclick="setTaskState(this,'done')">已完成</button>
+          <button class="btn ghost sm" data-state="failed" onclick="setTaskState(this,'failed')">异常</button>
+          <input type="text" id="task-q" placeholder="搜索任务名 / ID…" style="max-width:230px" oninput="renderTasks()">
+        </div>
+        <div id="task-list"><div class="empty">加载中…</div></div>
+      </div>
+    </section>
+

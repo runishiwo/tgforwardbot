@@ -1,0 +1,31 @@
+# ---- 敏感文件：切勿提交（含你的 API 凭据 / 登录 session / 访问密码）----
+config.yml
+*.session
+*.session-journal
+
+# ---- 运行时数据 ----
+data/
+log/
+media_tmp/
+*.db
+*.db-journal
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---- 备份 ----
+backup_*/
+*.bak
+*.bak-*
+*.pre-*

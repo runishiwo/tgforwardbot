@@ -1,0 +1,65 @@
+    <!-- ============ 发起转发 ============ -->
+    <section class="view" id="view-manual">
+      <div class="card">
+        <h2>发起手动转发</h2>
+        <p class="cardsub">按频道 + 时间范围扫描并转发历史消息。可以同时跑多条任务；留空关键词则按「手动转发」大类的词表开关判断。<a class="inline" href="javascript:void(0)" onclick="switchView('tasks')">去任务中心 →</a></p>
+        <div class="field">
+          <label>任务名称</label>
+          <input type="text" id="mf-name" placeholder="留空自动生成，例如「手动转发 10-11 20:30」" style="max-width:420px">
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label>① 来源频道（可多选）</label>
+            <div class="logbar">
+              <input type="text" class="grow" id="mf-sources-filter" placeholder="搜索频道…" oninput="filterChannels('mf-sources')">
+              <span class="counter" id="mf-sources-status"></span>
+              <button class="btn ghost sm" onclick="channelSelAll('mf-sources', this)">全选</button>
+            </div>
+            <div class="chlist" id="mf-sources"></div>
+          </div>
+          <div class="field">
+            <label>② 目的频道（可多选，仅有发言权限）</label>
+            <div class="logbar">
+              <input type="text" class="grow" id="mf-targets-filter" placeholder="搜索频道…" oninput="filterChannels('mf-targets')">
+              <span class="counter" id="mf-targets-status"></span>
+              <button class="btn ghost sm" onclick="channelSelAll('mf-targets', this)">全选</button>
+            </div>
+            <div class="chlist" id="mf-targets"></div>
+          </div>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label>③ 起始时间（本地时区，可留空）</label>
+            <input type="hidden" id="mf-start"><button type="button" class="dtbox" data-dt="mf-start" onclick="openPicker('mf-start')"><span class="ph">点击选择开始时间</span></button>
+          </div>
+          <div class="field">
+            <label>④ 结束时间（本地时区，可留空）</label>
+            <input type="hidden" id="mf-end"><button type="button" class="dtbox" data-dt="mf-end" onclick="openPicker('mf-end')"><span class="ph">点击选择结束时间</span></button>
+            <div class="hint">例如只转 10 月 1 日 09:00 ~ 12:00 之间发布的消息。</div>
+          </div>
+        </div>
+        <div class="field">
+          <label>⑤ 临时关键词（每行一个，或用 ; 分隔，留空 = 按「手动转发」大类词表开关）</label>
+          <textarea id="mf-keywords" rows="3" placeholder="每行一个，或用 ; 分隔（留空 = 按大类关键词开关判断）"></textarea>
+        </div>
+        <div class="grid3" style="margin-bottom:12px;align-items:flex-end">
+          <div class="field" style="margin:0">
+            <label>日志保留天数</label>
+            <input type="number" id="mf-keep" min="0" max="3650" value="30" style="max-width:160px">
+            <div class="hint">0 = 永久保留；默认 30 天。</div>
+          </div>
+          <label class="sw"><input type="checkbox" id="mf-anchor" checked><span>启用转发锚点去重</span></label>
+          <label class="sw"><input type="checkbox" id="mf-gdedup" checked><span>跨任务去重</span></label>
+        </div>
+        <p class="cardsub" id="mf-rule">过滤规则加载中…</p>
+        <div class="row">
+          <div class="field" style="margin:0">
+            <label>每个来源最多扫描消息数</label>
+            <input type="number" id="mf-limit" min="1" max="10000" value="2000" style="width:140px">
+          </div>
+          <div class="spacer"></div>
+          <button class="btn" id="mf-startbtn" onclick="startManual()">开始转发</button>
+        </div>
+      </div>
+    </section>
+
