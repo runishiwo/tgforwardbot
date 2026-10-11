@@ -4,7 +4,7 @@
 
     core.py      公共基础：路径常量、带时间戳打印、JSON 响应、文本切行
     words.py     词表：实时监控 / 手动转发**各用各的**关键词表与屏蔽词表 + 两个开关
-    tasks.py     任务中心底座：任务表(data/tasks.db)、每条任务的独立日志(log/tasks/)、
+    tasks.py     任务中心底座：任务表(data/tasks.db)、每条任务的独立日志(log/tasks/<id>/<日期>.log)、
                  转发锚点(data/anchors.db)、任务中心接口
     stats.py     统计：全局 + 按类别（实时 / 手动）的按天计数
     monitor.py   【实时监控】多条任务并行运行，各自来源/目的/词表/开关/日志 + 接口

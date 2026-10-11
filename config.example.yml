@@ -33,8 +33,9 @@ target_file: "targets.txt"
 # ---- 运行参数 ----
 reload_interval: 60       # 秒，词表文件热加载间隔
 forward_interval: 2       # 秒，两条消息之间的转发间隔
-max_retries: 3            # 转发失败最大重试次数
+max_retries: 3            # 转发失败最大重试次数（手动 / 实时任务实际为无限重试，此项仅作保底）
 album_scan_limit: 50      # 相册 / 媒体组扫描深度
+media_timeout: 900        # 秒，单个媒体的下载 / 上传超时（大文件慢网络可调大）
 log_cleanup_interval: 21600   # 秒，过期日志清理间隔（默认 6 小时）
 
 # ---- 目录 ----

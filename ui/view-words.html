@@ -20,13 +20,14 @@
 
         <div id="pane-keyword">
           <div class="wordbar">
-            <input type="text" class="grow" id="kw-input" placeholder="输入关键词后回车或点添加" onkeydown="if(event.key==='Enter'){event.preventDefault();wordAdd('keyword')}">
+            <input type="text" class="grow" id="kw-input" placeholder="输入关键词：实时筛选已有词条；不在表里就直接回车添加" oninput="wordInput('keyword')" onkeydown="if(event.key==='Enter'){event.preventDefault();wordAdd('keyword')}">
             <button class="btn" onclick="wordAdd('keyword')">添加</button>
             <button class="btn ghost" onclick="openBatch('keyword')">批量添加</button>
             <button class="btn ghost" onclick="wordToggleAll('keyword', this)">全选</button>
             <button class="btn danger" onclick="wordRemoveSel('keyword')">删除所选</button>
             <span class="counter" id="kw-status"></span>
           </div>
+          <div class="whint" id="kw-hint"></div>
 
           <div class="batchbox" id="kw-batch" style="display:none">
             <textarea id="kw-batch-text" rows="4"></textarea>
@@ -38,7 +39,6 @@
             </div>
           </div>
 
-          <div class="logbar"><input type="text" class="grow" id="kw-filter" placeholder="搜索筛选已有关键词…" oninput="wordRender('keyword')"></div>
           <div class="wordlist" id="kw-list"></div>
 
           <div class="previewbox">
@@ -54,13 +54,14 @@
 
         <div id="pane-blocked" style="display:none">
           <div class="wordbar">
-            <input type="text" class="grow" id="bl-input" placeholder="输入屏蔽词后回车或点添加" onkeydown="if(event.key==='Enter'){event.preventDefault();wordAdd('blocked')}">
+            <input type="text" class="grow" id="bl-input" placeholder="输入屏蔽词：实时筛选已有词条；不在表里就直接回车添加" oninput="wordInput('blocked')" onkeydown="if(event.key==='Enter'){event.preventDefault();wordAdd('blocked')}">
             <button class="btn" onclick="wordAdd('blocked')">添加</button>
             <button class="btn ghost" onclick="openBatch('blocked')">批量添加</button>
             <button class="btn ghost" onclick="wordToggleAll('blocked', this)">全选</button>
             <button class="btn danger" onclick="wordRemoveSel('blocked')">删除所选</button>
             <span class="counter" id="bl-status"></span>
           </div>
+          <div class="whint" id="bl-hint"></div>
 
           <div class="batchbox" id="bl-batch" style="display:none">
             <textarea id="bl-batch-text" rows="4"></textarea>
@@ -72,7 +73,6 @@
             </div>
           </div>
 
-          <div class="logbar"><input type="text" class="grow" id="bl-filter" placeholder="搜索筛选已有屏蔽词…" oninput="wordRender('blocked')"></div>
           <div class="wordlist" id="bl-list"></div>
 
           <div class="previewbox">

@@ -71,6 +71,7 @@ class KeywordManager:
         self.file_path = file_path
         self.keywords = []
         self.last_update = None
+        self.version = 0            # 每次重载 +1，供长跑任务判断「词表是否变了」而无需重读
         self._lock = asyncio.Lock()
         self._last_mtime = 0
 
@@ -91,6 +92,7 @@ class KeywordManager:
         new_keywords = self.load_keywords()
         async with self._lock:
             self.keywords = new_keywords
+            self.version += 1
             self.last_update = datetime.now()
             logging.info('列表已更新: 共 %d 个，更新时间: %s', len(self.keywords),
                          self.last_update.strftime('%Y-%m-%d %H:%M:%S'))
@@ -106,6 +108,12 @@ class KeywordManager:
     async def snapshot(self):
         async with self._lock:
             return self.keywords.copy()
+
+    async def versioned(self):
+        """返回 (版本号, 词条列表)。列表是**只读引用**——重载时整个换新对象，
+        不会原地修改，所以调用方可以放心长期持有。用于长跑任务按版本号判断是否需要换词表。"""
+        async with self._lock:
+            return self.version, self.keywords
 
 
 class WordScopeStore:
@@ -239,6 +247,13 @@ class WordScopeStore:
             scope = WORD_SCOPES[0]
         kind = 'blocked' if kind == 'blocked' else 'keyword'
         return dedup_words(await self.managers[(scope, kind)].snapshot())
+
+    async def words_versioned(self, scope, kind):
+        """带版本号的词条读取，供长跑任务做「变了才更新」的热重载。"""
+        if scope not in WORD_SCOPES:
+            scope = WORD_SCOPES[0]
+        kind = 'blocked' if kind == 'blocked' else 'keyword'
+        return await self.managers[(scope, kind)].versioned()
 
     async def effective_keywords(self, scope):
         return await self.words(scope, 'keyword')

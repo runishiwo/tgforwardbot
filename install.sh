@@ -132,6 +132,7 @@ reload_interval: 60
 forward_interval: 2
 max_retries: 3
 album_scan_limit: 50
+media_timeout: 900
 log_cleanup_interval: 21600
 log_dir: "log"
 media_tmp_dir: "media_tmp"

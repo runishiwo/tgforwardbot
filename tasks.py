@@ -1,7 +1,8 @@
 """任务中心底座：任务表、独立日志、转发锚点、通用工具与任务中心接口。
 
 - `TaskStore`：SQLite `data/tasks.db`，实时监控 / 手动转发共用一张表（`kind` 区分）；
-- `TaskLog`：每条任务一份独立日志 `log/tasks/<id>.log`，可按「日志保留天数」自动清理；
+- `TaskLog`：每条任务一个日志目录 `log/tasks/<id>/`，按自然日分文件 `<YYYY-MM-DD>.log`，
+  网页端可选日期查看，也可按「日志保留天数」自动清理或手动清理；
 - `AnchorStore`：**按源频道记录已转发过的消息**（锚点），防止重复转发；
 - 单条任务 = 来源频道 + 目的频道 + 自己的词表 + 开关 + 去重/日志保留设置。
 
@@ -12,6 +13,7 @@ import collections
 import json
 import os
 import re
+import shutil
 import sqlite3
 import time
 import uuid
@@ -19,7 +21,7 @@ from datetime import datetime, timedelta
 
 from aiohttp import web
 
-from core import json_response, server_of
+from core import json_response, print_ts, server_of
 
 MONITOR = 'monitor'
 MANUAL = 'manual'
@@ -43,6 +45,13 @@ RETENTION_MAX = 3650       # 上限（约 10 年）
 ANCHOR_CAP = 20000         # 单个（任务, 频道）最多记多少条锚点，超了淘汰成水位线
 
 TS_RE = re.compile(r'^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\]')
+DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+TASK_ID_RE = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
+
+
+def today_text():
+    """今天的日期文本 `YYYY-MM-DD`。"""
+    return datetime.now().strftime('%Y-%m-%d')
 
 
 # ================= 通用工具 =================
@@ -121,19 +130,21 @@ def norm_peers(items):
     return out
 
 
-def _line_is_old(line, cutoff):
+def _line_date(line):
+    """从日志行里取出日期 `YYYY-MM-DD`；取不到返回 `None`（旧日志迁移用）。"""
     m = TS_RE.match(line)
-    if not m:
-        return False
-    try:
-        return datetime.strptime(m.group(1) + ' ' + m.group(2), '%Y-%m-%d %H:%M:%S') < cutoff
-    except ValueError:
-        return False
+    return m.group(1) if m else None
 
 
 # ================= 每条任务的独立日志 =================
 class TaskLog:
-    """每条任务独立的日志文件，附带最近若干行的内存缓存。"""
+    """每条任务一个日志目录 `log/tasks/<id>/`，按自然日分文件 `<YYYY-MM-DD>.log`。
+
+    - 写日志时自动落到「今天」那个文件，跨零点自动换文件；
+    - `dates()` 列出该任务已有的日期，网页端据此提供「选择历史日志」的下拉框；
+    - `prune()` 按「日志保留天数」整文件删除，不再逐行裁剪；
+    - 旧的单文件日志 `log/tasks/<id>.log` 会在启动时由 `migrate()` 自动拆分迁移。
+    """
 
     def __init__(self, base_dir, buffer_size=500):
         self.dir = os.path.abspath(base_dir)
@@ -141,25 +152,77 @@ class TaskLog:
         self.buffer_size = buffer_size
         self.buffers = {}
 
-    def path(self, task_id):
-        return os.path.join(self.dir, '%s.log' % task_id)
+    # ---------------- 路径 ----------------
+    @staticmethod
+    def _safe(task_id):
+        tid = str(task_id or '')
+        return tid if TASK_ID_RE.match(tid) else None
 
-    def append(self, task_id, text, ts=True):
+    def folder(self, task_id):
+        """该任务的日志目录 `log/tasks/<id>/`。任务 id 非法时返回 None。"""
+        tid = self._safe(task_id)
+        return os.path.join(self.dir, tid) if tid else None
+
+    def legacy_path(self, task_id):
+        """旧格式的单文件日志 `log/tasks/<id>.log`（迁移用）。"""
+        tid = self._safe(task_id)
+        return os.path.join(self.dir, '%s.log' % tid) if tid else None
+
+    def path(self, task_id, date=None):
+        """某一天的日志文件；`date` 缺省为今天。"""
+        folder = self.folder(task_id)
+        if not folder:
+            return None
+        day = date if (date and DATE_RE.match(str(date))) else today_text()
+        return os.path.join(folder, '%s.log' % day)
+
+    # ---------------- 写 ----------------
+    def append(self, task_id, text, ts=True, tag=None):
+        """写一行日志。`tag` 是类别标签（成功/屏蔽/未命中/失败），会插在时间戳之后，
+        便于网页端按类别筛选；按当天日期落盘。"""
         text = str(text).rstrip('\n')
-        line = '[%s] %s' % (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), text) if ts else text
-        try:
-            with open(self.path(task_id), 'a', encoding='utf-8') as f:
-                f.write(line + '\n')
-        except Exception:
-            pass
+        day = today_text()
+        if ts:
+            stamp = '[%s]' % datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            line = '%s [%s] %s' % (stamp, tag, text) if tag else '%s %s' % (stamp, text)
+        else:
+            line = '[%s] %s' % (tag, text) if tag else text
+        path = self.path(task_id, day)
+        if path:
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, 'a', encoding='utf-8') as f:
+                    f.write(line + '\n')
+            except Exception:
+                pass
         self.buffers.setdefault(task_id, collections.deque(maxlen=self.buffer_size)).append(line)
         return line
 
     def recent(self, task_id):
         return list(self.buffers.get(task_id, ()))
 
-    def read(self, task_id, tail=400, max_bytes=1024 * 1024):
-        path = self.path(task_id)
+    # ---------------- 读 ----------------
+    def dates(self, task_id):
+        """该任务已有的日志日期（`YYYY-MM-DD`，新的在前）。"""
+        folder = self.folder(task_id)
+        out = []
+        if folder and os.path.isdir(folder):
+            try:
+                names = os.listdir(folder)
+            except OSError:
+                names = []
+            for name in names:
+                if name.endswith('.log') and DATE_RE.match(name[:-4]):
+                    out.append(name[:-4])
+        return sorted(out, reverse=True)
+
+    def read(self, task_id, date=None, tail=400, max_bytes=1024 * 1024):
+        """读某一天的日志（缺省今天）。返回 `lines/date/size/truncated`。"""
+        day = date if (date and DATE_RE.match(str(date))) else today_text()
+        path = self.path(task_id, day)
+        base = {'lines': [], 'date': day, 'mtime': 0, 'size': 0, 'truncated': False}
+        if not path:
+            return base
         try:
             size = os.path.getsize(path)
             mtime = int(os.path.getmtime(path))
@@ -171,49 +234,121 @@ class TaskLog:
                     text = f.read().decode('utf-8', 'ignore')
             lines = text.splitlines()
             truncated = len(lines) > tail
-            return {'lines': lines[-tail:] if truncated else lines, 'mtime': mtime,
-                    'size': size, 'truncated': truncated}
+            base.update({'lines': lines[-tail:] if truncated else lines, 'mtime': mtime,
+                         'size': size, 'truncated': truncated})
+            return base
         except FileNotFoundError:
-            return {'lines': [], 'mtime': 0, 'size': 0, 'truncated': False}
+            return base
         except Exception as exc:
-            return {'lines': [], 'mtime': 0, 'size': 0, 'truncated': False, 'error': str(exc)}
+            base['error'] = str(exc)
+            return base
+
+    # ---------------- 清理 ----------------
+    def clear(self, task_id, date=None):
+        """删除日志文件：给了 `date` 只删那天，否则清空该任务全部日期。返回删除行数。"""
+        folder = self.folder(task_id)
+        if not folder:
+            return 0
+        targets = self.dates(task_id) if not date else [
+            date if DATE_RE.match(str(date)) else today_text()]
+        dropped = 0
+        for day in targets:
+            path = os.path.join(folder, '%s.log' % day)
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                    dropped += sum(1 for _ in f)
+                os.remove(path)
+            except OSError:
+                pass
+        if not date:
+            self.buffers.pop(task_id, None)
+        return dropped
 
     def prune(self, task_id, keep_days):
-        """只保留最近 keep_days 天的日志行；keep_days<=0 表示永久保留。返回删除行数。"""
+        """按「日志保留天数」清理：整日期文件超出保留期就删掉。返回删除行数。"""
         if not keep_days or int(keep_days) <= 0:
             return 0
-        path = self.path(task_id)
-        if not os.path.isfile(path):
+        cutoff = (datetime.now() - timedelta(days=int(keep_days))).strftime('%Y-%m-%d')
+        dropped = 0
+        for day in self.dates(task_id):
+            if day >= cutoff:          # 文件名即日期，字典序比较等价于日期比较
+                continue
+            dropped += self.clear(task_id, day)
+        return dropped
+
+    def remove(self, task_id):
+        """任务被删除时清掉它的整个日志目录（含旧格式单文件）。"""
+        self.buffers.pop(task_id, None)
+        folder = self.folder(task_id)
+        if folder and os.path.isdir(folder):
+            shutil.rmtree(folder, ignore_errors=True)
+        legacy = self.legacy_path(task_id)
+        if legacy:
+            try:
+                os.remove(legacy)
+            except OSError:
+                pass
+
+    # ---------------- 迁移 ----------------
+    def migrate(self):
+        """把旧的单文件日志 `log/tasks/<id>.log` 按行内时间戳拆分到 `log/tasks/<id>/<date>.log`。"""
+        moved = 0
+        try:
+            names = os.listdir(self.dir)
+        except OSError:
             return 0
-        cutoff = datetime.now() - timedelta(days=int(keep_days))
+        for name in names:
+            if not name.endswith('.log'):
+                continue                     # 新格式是目录，不是文件
+            path = os.path.join(self.dir, name)
+            if not os.path.isfile(path):
+                continue
+            tid = name[:-4]
+            if not self._safe(tid):
+                continue
+            try:
+                moved += self._migrate_file(tid, path)
+            except Exception as exc:
+                print_ts('日志迁移失败 %s: %s' % (name, exc))
+        if moved:
+            print_ts('日志已迁移为按日分文件：共 %d 行' % moved)
+        return moved
+
+    def _migrate_file(self, task_id, path):
         try:
             with open(path, 'r', encoding='utf-8', errors='ignore') as f:
                 lines = f.read().splitlines()
         except Exception:
             return 0
-        kept = [ln for ln in lines if not _line_is_old(ln, cutoff)]
-        dropped = len(lines) - len(kept)
-        if not dropped:
+        if not lines:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
             return 0
+        fallback = datetime.fromtimestamp(os.path.getmtime(path)).strftime('%Y-%m-%d')
+        buckets = collections.OrderedDict()
+        last = fallback
+        for ln in lines:
+            m = TS_RE.match(ln)
+            day = m.group(1) if m else last     # 没时间戳的续行归到上一条那天
+            last = day
+            buckets.setdefault(day, []).append(ln)
+        n = 0
+        for day, rows in buckets.items():
+            target = self.path(task_id, day)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            mode = 'a' if os.path.isfile(target) else 'w'
+            with open(target, mode, encoding='utf-8') as f:
+                f.write('\n'.join(rows) + '\n')
+            n += len(rows)
         try:
-            tmp = path + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(kept) + ('\n' if kept else ''))
-            os.replace(tmp, path)
-        except Exception:
-            return 0
-        buf = self.buffers.get(task_id)
-        if buf is not None:
-            self.buffers[task_id] = collections.deque(
-                (ln for ln in buf if not _line_is_old(ln, cutoff)), maxlen=self.buffer_size)
-        return dropped
-
-    def remove(self, task_id):
-        self.buffers.pop(task_id, None)
-        try:
-            os.remove(self.path(task_id))
+            os.remove(path)
         except OSError:
             pass
+        return n
 
 
 # ================= 转发锚点（按源频道去重） =================
@@ -515,7 +650,7 @@ def task_summary(task):
     cfg = task.get('config') or {}
     parts = []
     if task['kind'] == MONITOR:
-        parts.append('来源：全部频道' if not cfg.get('sources') else '来源：%d 个频道' % len(cfg['sources']))
+        parts.append('来源：全部频道（不含自建）' if not cfg.get('sources') else '来源：%d 个频道' % len(cfg['sources']))
         parts.append('目的：%d 个频道' % len(cfg.get('targets') or []))
         kw = clean_words(cfg.get('keywords'))
         bl = clean_words(cfg.get('blocked'))
@@ -562,6 +697,9 @@ def list_public(tasks):
             'created_text': fmt_ts(t.get('created_at')),
             'updated_text': fmt_ts(t.get('updated_at')),
             'error': t.get('error', ''),
+            'phase': cfg.get('phase') or '',
+            # 手动任务是否留有可续跑的断点（暂停/中断后点「恢复」能从断点继续，不重扫）
+            'resumable': bool((cfg.get('progress') or {}).get('stage')),
             'summary': task_summary(t),
         })
     return out
@@ -583,19 +721,21 @@ async def handle_tasks_list(request):
 
 
 async def handle_task_detail(request):
-    task = server_of(request).bot.task_store.get(request.query.get('id', ''))
+    srv = server_of(request)
+    task = srv.bot.task_store.get(request.query.get('id', ''))
     if not task:
         return json_response({'ok': False, 'error': '任务不存在'}, status=404)
     detail = list_public([task])[0]
     detail['config'] = task.get('config') or {}
     detail['recent'] = task.get('recent') or []
-    srv = server_of(request)
     try:
         detail['anchors'] = srv.bot.anchors.task_info(task['id'])
     except Exception:
         detail['anchors'] = {'channels': 0, 'messages': 0, 'items': []}
-    return json_response({'ok': True, 'task': detail,
-                          'log': srv.bot.task_log.read(task['id'], tail=400)})
+    date = (request.query.get('date') or '').strip()
+    log = srv.bot.task_log.read(task['id'], date=date or None, tail=400)
+    log['dates'] = srv.bot.task_log.dates(task['id'])
+    return json_response({'ok': True, 'task': detail, 'log': log})
 
 
 async def handle_task_log(request):
@@ -608,7 +748,9 @@ async def handle_task_log(request):
     tail = max(20, min(tail, 5000))
     if not srv.bot.task_store.get(task_id):
         return json_response({'ok': False, 'error': '任务不存在'}, status=404)
-    data = srv.bot.task_log.read(task_id, tail=tail)
+    date = (request.query.get('date') or '').strip()
+    data = srv.bot.task_log.read(task_id, date=date or None, tail=tail)
+    data['dates'] = srv.bot.task_log.dates(task_id)
     q = (request.query.get('q') or '').strip()
     if q:
         data['lines'] = [ln for ln in data['lines'] if q in ln]
@@ -616,6 +758,37 @@ async def handle_task_log(request):
     data['ok'] = True
     data['q'] = q
     return json_response(data)
+
+
+async def handle_task_log_clear(request):
+    """清理任务日志。
+
+    body: `{'id': <任务 id 或 '*'>, 'date': 'YYYY-MM-DD' 或留空}`。
+    - `date` 留空 → 清空该任务的全部日期；
+    - `id` 为 `*` → 清空所有任务的日志（可配合 `date` 只清某一天）。
+    """
+    srv = server_of(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    task_id = str(body.get('id') or '')
+    date = str(body.get('date') or '').strip()
+    if date and not DATE_RE.match(date):
+        return json_response({'ok': False, 'error': '日期格式应为 YYYY-MM-DD'}, status=400)
+    log = srv.bot.task_log
+    if task_id == '*':
+        dropped = 0
+        for task in srv.bot.task_store.all():
+            dropped += log.clear(task['id'], date or None)
+        return json_response({'ok': True, 'scope': 'all', 'date': date, 'cleared': dropped})
+    if not srv.bot.task_store.get(task_id):
+        return json_response({'ok': False, 'error': '任务不存在'}, status=404)
+    dropped = log.clear(task_id, date or None)
+    if not date:
+        # 清空全部后补一行说明，避免页面看起来「日志凭空消失」
+        log.append(task_id, '该任务的历史日志已被清空')
+    return json_response({'ok': True, 'scope': 'task', 'date': date, 'cleared': dropped})
 
 
 async def handle_task_delete(request):
@@ -673,6 +846,7 @@ ROUTES = [
     web.get('/api/tasks', handle_tasks_list),
     web.get('/api/tasks/detail', handle_task_detail),
     web.get('/api/tasks/log', handle_task_log),
+    web.post('/api/tasks/log/clear', handle_task_log_clear),
     web.post('/api/tasks/delete', handle_task_delete),
     web.get('/api/anchors', handle_anchors_get),
     web.post('/api/anchors/reset', handle_anchors_reset),

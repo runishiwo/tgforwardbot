@@ -15,7 +15,9 @@ from datetime import datetime
 
 from aiohttp import web
 
-from core import json_response, server_of, split_lines, split_words
+from core import (TAG_BLOCK, TAG_FAIL, TAG_OK_DIRECT, TAG_OK_DOWNLOAD, TAG_SKIP, id_range_text,
+                  json_response,
+                  preview_text, server_of, split_lines, split_words)
 from tasks import (MONITOR, KIND_SCOPE, clean_words, clamp_keep_days, list_public,
                    match_any, norm_peers, task_summary)
 
@@ -34,6 +36,7 @@ class MonitorTask:
         self.worker = None
         self._stopped = True
         self.seen = collections.OrderedDict()
+        self._pending_ids = []       # 已入队但还没汇总记日志的消息 id
         self._dests = None
         self.apply_config()
 
@@ -125,10 +128,17 @@ class MonitorTask:
             self._dests = await self.bot.resolve_peers(self.targets)
         return self._dests
 
-    def log(self, text):
-        line = self.bot.task_log.append(self.id, text)
+    def log(self, text, tag=None):
+        line = self.bot.task_log.append(self.id, text, tag=tag)
         self.store.add_recent(self.record, line)
         return line
+
+    def _flush_enqueue_log(self):
+        """把这一批入队的消息汇总成一行日志（不逐条刷屏）。"""
+        ids, self._pending_ids = self._pending_ids, []
+        if not ids:
+            return
+        self.log('%s 进入队列（待转发 %d 条）' % (id_range_text(ids), len(ids)))
 
     # ---------- 消息处理 ----------
     async def offer(self, chat, message):
@@ -136,6 +146,11 @@ class MonitorTask:
         if not self.running:
             return
         chat_id = self.bot.peer_id(chat)
+        # 来源留空 = 监听所有频道，但排除「自己创建的频道」：
+        # 手动转发刚投进自有频道的消息，不该被实时任务再捞一遍（会重复转发）。
+        # 若来源是手动勾选的，则用户明确要监听的频道一律不排除。
+        if self.all_sources and await self.bot.is_own_channel(chat_id):
+            return
         if not self.accepts(chat_id, getattr(chat, 'username', '') or '',
                             getattr(chat, 'title', '') or ''):
             return
@@ -145,7 +160,7 @@ class MonitorTask:
                 self.id, chat_id, message.id, self.global_dedup):
             self.store.stats_add(self.record, 'skipped')
             self.bot.stats.inc('skipped', scope=_SCOPE)
-            self.log('消息 %s 已转发过（源频道锚点），跳过' % message.id)
+            self.log('消息 %s 已转发过（源频道锚点），跳过' % message.id, TAG_SKIP)
             return
         self.store.stats_add(self.record, 'checked')
         if self.keyword_on():
@@ -159,16 +174,16 @@ class MonitorTask:
                 self.store.stats_add(self.record, 'skipped')
                 self.bot.stats.inc('skipped', scope=_SCOPE)
                 reason = '命中关键词但同时命中屏蔽词' if self.keyword_on() else '命中屏蔽词'
-                self.log('消息 %s %s，不转发：%s' % (message.id, reason, text[:50].replace('\n', ' ')))
+                self.log('消息 %s %s，不转发：%s' % (message.id, reason, preview_text(text)),
+                         TAG_BLOCK)
                 return
         if self.is_duplicate(chat_id, message.id):
             self.store.stats_add(self.record, 'skipped')
             self.bot.stats.inc('skipped', scope=_SCOPE)
-            self.log('消息 %s 已在任务内处理过，跳过' % message.id)
+            self.log('消息 %s 已在任务内处理过，跳过' % message.id, TAG_SKIP)
             return
         await self.queue.put((chat, message))
-        self.log('消息 %s 进入队列（队列 %d）：%s' % (
-            message.id, self.queue.qsize(), text[:50].replace('\n', ' ')))
+        self._pending_ids.append(message.id)   # 汇总成一行「进入队列」日志
 
     async def _run(self):
         while not self._stopped:
@@ -178,9 +193,13 @@ class MonitorTask:
                 continue
             except asyncio.CancelledError:
                 return
+            self._flush_enqueue_log()    # 先汇总「进入队列」，再开始转发，保证日志顺序
             try:
                 dests = await self.resolve_dests()
-                ok = await self.bot.deliver(chat, message, dests, log=self.log)
+                # 与手动转发一致：网络抖动 / 被限流时**一直重试**（退避最长 60 秒），
+                # 不因几次失败就把消息丢掉。停用任务时会直接取消 worker，不会卡住。
+                ok = await self.bot.deliver(chat, message, dests, log=self.log,
+                                            retry_forever=True)
                 if ok:
                     self.store.stats_add(self.record, 'sent')
                     self.bot.stats.inc('forwarded', scope=_SCOPE)
@@ -188,8 +207,14 @@ class MonitorTask:
                     if self.anchor_on:
                         self.bot.anchors.advance(self.id, self.bot.peer_id(chat), message.id)
                     titles = '、'.join(x.get('title', '') for x in self.target_meta) or '默认目的'
-                    self.log('消息 %s 转发成功 → %s（%s）' % (
-                        message.id, titles, getattr(chat, 'title', chat.id)))
+                    # 按实际转发路径分两类日志：直接转发 / 下载后转发（见 bot.deliver 返回值）
+                    if ok == 'download':
+                        how, tag = '下载后转发成功', TAG_OK_DOWNLOAD
+                    else:
+                        how, tag = '转发成功', TAG_OK_DIRECT
+                    self.log('消息 %s %s → %s（%s）：%s' % (
+                        message.id, how, titles, getattr(chat, 'title', chat.id),
+                        preview_text(message.message)), tag)
                 else:
                     self.store.stats_add(self.record, 'failed')
                     self.bot.stats.inc('failed', scope=_SCOPE)
@@ -198,7 +223,7 @@ class MonitorTask:
             except Exception as exc:
                 self.store.stats_add(self.record, 'failed')
                 self.bot.stats.inc('failed', scope=_SCOPE)
-                self.log('消息 %s 转发异常：%s' % (getattr(message, 'id', '?'), exc))
+                self.log('消息 %s 转发异常：%s' % (getattr(message, 'id', '?'), exc), TAG_FAIL)
             finally:
                 self.store.save(self.record)
             await asyncio.sleep(self.bot.forward_interval)
@@ -270,7 +295,7 @@ class MonitorTaskManager:
         self.tasks[task.id] = task
         task.log('任务已创建：来源 %s，目的 %d 个频道；关键词过滤 %s，屏蔽词过滤 %s，'
                  '去重 %s，日志保留 %s' % (
-                     '全部频道' if not task.sources else '%d 个频道' % len(task.sources),
+                     '全部频道（不含自建）' if not task.sources else '%d 个频道' % len(task.sources),
                      len(task.targets),
                      '开' if task.use_keyword else '关',
                      '开' if task.use_blocked else '关',

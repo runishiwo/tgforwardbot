@@ -10,6 +10,7 @@ import hashlib
 import html as html_mod
 import logging
 import os
+import re
 from datetime import datetime
 from string import Template
 
@@ -27,6 +28,11 @@ from words import ROUTES as WORD_ROUTES
 # 避免每次请求都重读文件；内容变化时（mtime 变）自动重读并重算 ETag。
 _STATIC_CACHE = {}
 _ADMIN_CACHE = {}
+
+# 字体文件（MiSans）扁平放在 ui/fonts/ 下：只允许「字母数字开头的文件名」，杜绝路径穿越。
+_FONT_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
+_FONT_TYPES = {'.css': 'text/css', '.woff2': 'font/woff2', '.woff': 'font/woff',
+               '.ttf': 'font/ttf', '.otf': 'font/otf'}
 
 # 管理台由这些片段按序拼装（运行时由 web.py 读取后拼接）
 _ADMIN_PARTS = (
@@ -79,6 +85,7 @@ class WebServer:
             web.get('/logout', self.handle_logout),
             web.get('/admin.css', self.handle_static_css),
             web.get('/admin.js', self.handle_static_js),
+            web.get('/fonts/{name}', self.handle_static_font),
             web.get('/telegram-login', self.handle_telegram_login),
             web.post('/api/telegram-login', self.handle_telegram_login_post),
             web.get('/api/status', self.handle_status),
@@ -195,6 +202,28 @@ class WebServer:
 
     async def handle_static_js(self, request):
         return await self._serve_static(request, 'admin.js')
+
+    async def handle_static_font(self, request):
+        """ui/fonts/ 下的字体资源（MiSans 的 css + woff2 分片）。
+
+        woff2 文件名带内容 hash，可长期强缓存；css 是入口，缓存 1 天。
+        """
+        name = request.match_info.get('name', '')
+        if not _FONT_NAME_RE.match(name):
+            return web.Response(text='Not found', status=404)
+        ext = os.path.splitext(name)[1].lower()
+        ctype = _FONT_TYPES.get(ext)
+        if ctype is None:
+            return web.Response(text='Not found', status=404)
+        loaded = _read_cached(os.path.join(UI_DIR, 'fonts', name))
+        if loaded is None:
+            return web.Response(text='Not found', status=404)
+        content, etag = loaded
+        cache = 'public, max-age=86400' if ext == '.css' else 'public, max-age=31536000, immutable'
+        headers = {'ETag': etag, 'Cache-Control': cache}
+        if request.headers.get('If-None-Match') == etag:
+            return web.Response(status=304, headers=headers)
+        return web.Response(body=content, content_type=ctype, headers=headers)
 
     async def handle_logout(self, request):
         resp = web.HTTPFound('/login')
@@ -351,6 +380,7 @@ class WebServer:
                     self.bot.auth_phone = None
                     self.bot.auth_phone_code_hash = None
                     await self.bot.finish_web_login()
+                    self._kick_auto_resume()   # 刚登录成功：把待恢复的手动任务拉起来
                     raise web.HTTPFound('/telegram-login')
                 if action == 'password':
                     password = data.get('password', '')
@@ -360,6 +390,7 @@ class WebServer:
                     self.bot.auth_phone = None
                     self.bot.auth_phone_code_hash = None
                     await self.bot.finish_web_login()
+                    self._kick_auto_resume()   # 刚登录成功：把待恢复的手动任务拉起来
                     raise web.HTTPFound('/telegram-login')
                 raise ValueError('无效操作')
             except web.HTTPException:
@@ -525,7 +556,23 @@ class WebServer:
         site = web.TCPSite(runner, self.host, self.port)
         await site.start()
         print_ts('Web管理界面启动，访问 http://%s:%s ，访问密码：%s' % (self.host, self.port, self.password))
+        # 后台自动恢复「上次没跑完」的手动转发任务（服务重启 / 断电中断），
+        # 避免任务一直停在「已停用」直到用户自己想起来点「恢复」。
+        self._kick_auto_resume()
+
+    def _kick_auto_resume(self):
+        """后台触发一次手动任务自动恢复；不阻塞启动，也不影响登录响应。"""
+        try:
+            asyncio.create_task(self.manual.auto_resume_all())
+        except RuntimeError as exc:          # 没有运行中的事件循环（理论上不会发生）
+            print_ts('启动手动任务自动恢复失败：%s' % exc)
 
     async def stop(self):
+        # 先把正在跑的手动转发任务停下来（记为「已停用」，可恢复），
+        # 再关 Web 服务；此时 Telegram 客户端还没断，收尾写日志是安全的。
+        try:
+            await self.manual.stop_all()
+        except Exception as exc:
+            print_ts('停止手动转发任务时出错：%s' % exc)
         await self.app.shutdown()
         await self.app.cleanup()

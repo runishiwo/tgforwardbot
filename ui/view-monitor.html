@@ -2,14 +2,14 @@
     <section class="view" id="view-monitor">
       <div class="card">
         <h2>新建实时监控任务</h2>
-        <p class="cardsub">每条任务独立运行、互不影响；可以同时建多条。来源留空表示<strong>监控全部频道</strong>。关键词/屏蔽词留空则沿用「实时监控」大类词表（可在词表管理里设置）。</p>
+        <p class="cardsub">每条任务独立运行、互不影响；可以同时建多条。来源留空表示<strong>监控全部频道（不含你自己创建的频道）</strong>。关键词/屏蔽词留空则沿用「实时监控」大类词表（可在词表管理里设置）。</p>
         <div class="field">
           <label>任务名称</label>
           <input type="text" id="mt-name" placeholder="例如：科技频道 → 主频道" style="max-width:420px">
         </div>
         <div class="grid2">
           <div class="field">
-            <label>来源频道（可多选，留空 = 全部频道）</label>
+            <label>来源频道（可多选，留空 = 全部频道，不含自建）</label>
             <div class="logbar">
               <input type="text" class="grow" id="mt-sources-filter" placeholder="搜索频道…" oninput="filterChannels('mt-sources')">
               <span class="counter" id="mt-sources-status"></span>
@@ -17,7 +17,7 @@
               <button class="btn ghost sm" onclick="loadDialogs()">重新加载</button>
             </div>
             <div class="chlist" id="mt-sources"></div>
-            <div class="hint">不选任何频道 = 监听你的全部频道。</div>
+            <div class="hint">不选任何频道 = 监听你的全部频道，但会排除<strong>你自己创建的频道</strong>（避免把手动转发投进去的内容又捞一遍重复转发）。想监听自建频道请在这里手动勾选。</div>
           </div>
           <div class="field">
             <label>目的频道（可多选，只列出你有发言权限的频道）</label>

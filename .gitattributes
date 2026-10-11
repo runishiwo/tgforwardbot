@@ -8,3 +8,9 @@
 *.js   text eol=lf
 *.md   text eol=lf
 *.txt  text eol=lf
+
+# 二进制资源：不要做行尾/编码转换（内嵌字体）
+*.woff2 binary
+*.woff  binary
+*.ttf   binary
+*.otf   binary

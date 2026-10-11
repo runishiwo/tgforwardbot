@@ -2,6 +2,7 @@
 const $ = id => document.getElementById(id);
 const GROUP_LABEL = { monitor: '实时监控', manual: '手动转发' };
 const STATE_LABEL = { running: '运行中', paused: '已停用', done: '已完成', cancelled: '已取消', failed: '失败', interrupted: '已中断' };
+const PHASE_HINT = { scanning: '扫描中…', forwarding: '转发中…' };
 const TITLES = {
   dashboard: ['总览', '所有任务的整体运行情况'],
   'dashboard-monitor': ['实时监控概览', '实时监控任务的运行与统计数据'],
@@ -20,6 +21,9 @@ let tasksCache = [];
 let detailId = null;
 let detailMode = 'view';
 let detailLines = [];
+let logFilter = '';        // 日志类别筛选：'' = 全部；其余为 直转/下载转/屏蔽/未命中/失败
+let detailLogDate = '';    // 当前查看的日志日期 YYYY-MM-DD，'' = 今天
+let detailLogDates = [];   // 该任务已有的日志日期列表（新 → 旧）
 let dialogsAll = [];
 let dialogsPostable = [];
 
@@ -107,7 +111,7 @@ async function loadStats() {
     ];
     $('stat-cards').innerHTML = cards.map(x =>
       `<div class="stat ${x[2]}"><div class="k">${x[0]}</div><div class="v">${x[1]}</div><div class="t">${esc(x[3])}</div></div>`).join('')
-      + `<div class="stat"><div class="k">连续运行</div><div class="v" style="font-size:16px">${fmtUptime(d.uptime_seconds)}</div><div class="t">自 ${esc(d.started_at || '')}</div></div>`;
+      + `<div class="stat"><div class="k">连续运行</div><div class="v" style="font-size:18px">${fmtUptime(d.uptime_seconds)}</div><div class="t">自 ${esc(d.started_at || '')}</div></div>`;
     renderChart('chart', d.days || []);
     const list = (d.recent_tasks || []).filter(x => x.state === 'running'); 
     $('run-count').textContent = list.length ? ('共 ' + list.length + ' 条') : '';
@@ -118,14 +122,28 @@ async function loadStats() {
 }
 function renderChart(target, days) {
   const el = (typeof target === 'string' && $(target)) ? $(target) : $('chart');
-  const max = Math.max(1, ...days.map(d => Math.max(d.forwarded || 0, d.failed || 0)));
-  el.innerHTML = days.map(d => {
-    const h1 = Math.round((d.forwarded || 0) / max * 100), h2 = Math.round((d.failed || 0) / max * 100);
-    return `<div class="col"><div class="bars">
-      <div class="bar" style="height:${Math.max(2, h1)}%" title="成功 ${d.forwarded || 0}"></div>
-      <div class="bar b2" style="height:${Math.max(2, h2)}%" title="失败 ${d.failed || 0}"></div>
-    </div><div class="lbl">${esc(d.label || d.date || '')}　${d.forwarded || 0}</div></div>`;
+  days = days || [];
+  if (!days.length) { el.innerHTML = '<div class="empty">暂无数据</div>'; return; }
+  const W = 720, H = 190, PL = 34, PR = 12, PT = 14, PB = 26;
+  const iw = W - PL - PR, ih = H - PT - PB;
+  const rawMax = Math.max(1, ...days.map(d => Math.max(d.forwarded || 0, d.failed || 0)));
+  const top = rawMax <= 5 ? 5 : rawMax <= 10 ? 10 : rawMax <= 20 ? 20 : rawMax <= 50 ? 50 : rawMax <= 100 ? 100 : Math.ceil(rawMax / 100) * 100;
+  const X = i => (days.length === 1 ? PL + iw / 2 : PL + iw * i / (days.length - 1));
+  const Y = v => PT + ih - ih * v / top;
+  const line = key => days.map((d, i) => `${X(i).toFixed(1)},${Y(d[key] || 0).toFixed(1)}`).join(' ');
+  const grid = [0, top / 2, top].map(v =>
+    `<line x1="${PL}" y1="${Y(v)}" x2="${W - PR}" y2="${Y(v)}" class="gl"/><text x="${PL - 6}" y="${Y(v) + 3.5}" class="gt" text-anchor="end">${top >= 100 ? Math.round(v) : v}</text>`
+  ).join('');
+  const dots = days.map((d, i) => {
+    const lbl = esc(d.label || d.date || '');
+    return `<circle cx="${X(i).toFixed(1)}" cy="${Y(d.forwarded || 0).toFixed(1)}" r="3.2" class="dot ok"><title>${lbl} 转发成功 ${d.forwarded || 0}</title></circle>` +
+      `<circle cx="${X(i).toFixed(1)}" cy="${Y(d.failed || 0).toFixed(1)}" r="3.2" class="dot err"><title>${lbl} 转发失败 ${d.failed || 0}</title></circle>`;
   }).join('');
+  const xl = days.map((d, i) =>
+    `<text x="${X(i).toFixed(1)}" y="${H - 8}" class="gt" text-anchor="middle">${esc(d.label || d.date || '')}</text>`).join('');
+  el.innerHTML = `<svg class="lchart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${grid}` +
+    `<polyline class="ln ok" points="${line('forwarded')}"/><polyline class="ln err" points="${line('failed')}"/>` +
+    `${dots}${xl}</svg>`;
 }
 async function renderOverview(kind) {
   const pre = kind === 'monitor' ? 'ov-mon' : 'ov-man';
@@ -133,23 +151,27 @@ async function renderOverview(kind) {
   try {
     const d = await api('/api/stats');
     const sc = (d.scopes && d.scopes[kind]) || {};
-    const t = sc.today || {}, tot = sc.totals || {}, days = sc.days || [];
+    const days = sc.days || [];
     const counts = sc.counts || {};
+    const td = await api('/api/tasks?kind=' + kind);
+    const tasks = td.tasks || [];
+    // 概览的数字 = 当前这一类「所有任务各自统计」的合计。
+    // 所以任务「重新开始」（统计清零）或删除任务后，这里的数字会同步减少 —— 不再是一个只增不减的独立计数器。
+    const agg = { checked: 0, matched: 0, sent: 0, failed: 0, skipped: 0, queued: 0 };
+    tasks.forEach(t => { const s = t.stats || {}; Object.keys(agg).forEach(k => { agg[k] += (s[k] || 0); }); });
     $('' + pre + '-stat').innerHTML = [
-      ['转发成功', t.forwarded || 0, 'ok', '累计 ' + (tot.forwarded || 0)],
-      ['转发失败', t.failed || 0, 'err', '累计 ' + (tot.failed || 0)],
-      ['跳过', t.skipped || 0, 'skip', '屏蔽词 / 重复'],
-      ['命中关键词', t.matched || 0, '', '进入转发判断'],
+      ['转发成功', agg.sent, 'ok', '全部任务合计'],
+      ['转发失败', agg.failed, 'err', '全部任务合计'],
+      ['跳过', agg.skipped, 'skip', '屏蔽词 / 重复 / 来源即目标'],
+      ['命中关键词', agg.matched, '', '全部任务合计'],
       ['运行中任务', counts.running || 0, 'ok', '已停用 ' + (counts.paused || 0)],
     ].map(x => `<div class="stat ${x[2]}"><div class="k">${x[0]}</div><div class="v">${x[1]}</div><div class="t">${esc(x[3])}</div></div>`).join('')
-      + `<div class="stat"><div class="k">${label}任务总数</div><div class="v" style="font-size:16px">${counts.total || 0}</div><div class="t">运行中 ${counts.running || 0} · 已停用 ${counts.paused || 0}</div></div>`;
+      + `<div class="stat"><div class="k">${label}任务总数</div><div class="v" style="font-size:18px">${counts.total || 0}</div><div class="t">运行中 ${counts.running || 0} · 已停用 ${counts.paused || 0}</div></div>`;
     renderChart(pre + '-chart', days);
     const states = ['running', 'paused', 'done', 'cancelled', 'failed', 'interrupted'];
     $('' + pre + '-states').innerHTML = states.map(s =>
       `<div class="it"><div class="k">${STATE_LABEL[s] || s}</div><div class="v">${counts[s] || 0}</div></div>`).join('');
     $('' + pre + '-state').textContent = '共 ' + (counts.total || 0) + ' 条';
-    const td = await api('/api/tasks?kind=' + kind);
-    const tasks = td.tasks || [];
     $('' + pre + '-count').textContent = tasks.length ? ('共 ' + tasks.length + ' 条') : '';
     $('' + pre + '-tasks').innerHTML = tasks.length ? tasks.map(taskCard).join('')
       : '<div class="empty">还没有' + label + '任务，去对应的建任务页创建一条</div>';
@@ -213,13 +235,14 @@ function taskCard(t) {
         <span class="pill s-${t.state}">${STATE_LABEL[t.state] || t.state}</span>
       </div>
       <div class="meta">${esc(t.summary)}</div>
-      <div class="meta">ID ${esc(t.id)} · 最近更新 ${esc(t.updated_text || '—')}${t.error ? ' · ' + esc(t.error) : ''}</div>
+      <div class="meta">ID ${esc(t.id)} · 最近更新 ${esc(t.updated_text || '—')}${PHASE_HINT[t.phase] ? ' · ' + PHASE_HINT[t.phase] : ''}${t.error ? ' · ' + esc(t.error) : ''}</div>
       <div class="nums">
         <div>扫描<b>${s.checked || 0}</b></div>
         <div>命中<b>${s.matched || 0}</b></div>
         <div>成功<b>${s.sent || 0}</b></div>
         <div>失败<b>${s.failed || 0}</b></div>
         <div>跳过<b>${s.skipped || 0}</b></div>
+        ${t.kind === 'manual' ? `<div>待转发<b>${s.queued || 0}</b></div>` : ''}
       </div>
     </div>
     <div class="acts" data-acts="${esc(t.id)}"></div>
@@ -239,7 +262,7 @@ function bindTaskActions(root, items) {
       else if (t.state === 'paused') box.appendChild(mk('恢复运行', 'ok', () => monitorState(id, 'resume')));
     } else {
       if (t.state === 'running') box.appendChild(mk('暂停', 'warn', () => manualState(id, 'pause')));
-      else if (t.state === 'paused' || t.state === 'interrupted') box.appendChild(mk('恢复', 'ok', () => manualState(id, 'resume')));
+      else if (t.state === 'paused' || t.state === 'interrupted') box.appendChild(mk(t.resumable ? '恢复（断点续跑）' : '恢复', 'ok', () => manualState(id, 'resume')));
       box.appendChild(mk('重新开始', 'ghost', () => restartManual(id, t.name)));
     }
     box.appendChild(mk('编辑', 'ghost', () => openEdit(id)));
@@ -265,7 +288,7 @@ async function manualState(id, action) {
   } catch (e) { toast('操作失败：' + e.message, 'err'); }
 }
 async function restartManual(id, name) {
-  if (!confirm('「重新开始」会清空该任务的转发记录，时间范围内命中的消息会从头重新转发一遍（之前已转过的也会再发一次，可能重复）。确定对「' + (name || id) + '」重新开始？')) return;
+  if (!confirm('「重新开始」会清空该任务的统计与转发记录，时间范围内命中的消息会从头重新转发一遍（之前已转过的也会再发一次，可能重复）。确定对「' + (name || id) + '」重新开始？')) return;
   try {
     await api('/api/tasks/manual/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: 'restart' }) });
     toast('任务已重新开始', 'ok');
@@ -293,7 +316,12 @@ async function openEdit(id) {
     const all = await api('/api/dialogs');
     const post = await api('/api/dialogs?postable=1');
     const srcItems = all.items || [];
-    const dstItems = (t.kind === 'manual' ? srcItems : (post.items || []));
+    // 目的频道只列「可发言」的频道（与新建任务一致）；已选但当前不可发言的仍保留，避免保存时被悄悄清掉
+    const postItems = post.items || [];
+    const postIds = new Set(postItems.map(x => x.id));
+    const keptTargets = (cfg.targets || []).filter(x => !postIds.has(x.id))
+      .map(x => ({ id: x.id, title: x.title, username: x.username || '' }));
+    const dstItems = postItems.concat(keptTargets);
     const srcSel = (cfg.sources || []).map(x => x.id);
     const dstSel = (cfg.targets || []).map(x => x.id);
     let html = `<div class="field"><label>任务名称</label><input type="text" id="ed-name" value="${esc(t.name)}" style="max-width:420px"></div>
@@ -323,13 +351,13 @@ async function openEdit(id) {
         <div class="field"><label>结束时间</label><input type="hidden" id="ed-end" value="${esc(r.end ? r.end.replace(' ', 'T') : '')}"><button type="button" class="dtbox" data-dt="ed-end" onclick="openPicker('ed-end')">${ r.end ? '<span class="val">' + esc(r.end) + '</span>' : '<span class="ph">点击选择结束时间</span>' }</button></div>
       </div>
       <div class="grid2">
-        <div class="field"><label>临时关键词（每行一个，或用 ; 分隔，留空 = 按大类词表）</label><textarea id="ed-keywords" rows="3" placeholder="每行一个，或用 ; 分隔（留空 = 用「手动转发」大类关键词表）">${esc((cfg.keywords || []).join('\n'))}</textarea></div>
-        <div class="field"><label>临时屏蔽词（每行一个，或用 ; 分隔，留空 = 按大类词表）</label><textarea id="ed-blocked" rows="3" placeholder="每行一个，或用 ; 分隔（命中即不转发，优先于关键词）">${esc((cfg.blocked || []).join('\n'))}</textarea></div>
+        <div class="field"><label>临时关键词（每行一个，或用 ; 分隔，留空 = 按大类词表，运行中改词表即时生效）</label><textarea id="ed-keywords" rows="3" placeholder="每行一个，或用 ; 分隔（留空 = 用「手动转发」大类关键词表，运行中改动即时生效）">${esc((cfg.keywords || []).join('\n'))}</textarea></div>
+        <div class="field"><label>临时屏蔽词（每行一个，或用 ; 分隔，留空 = 按大类词表，运行中改词表即时生效）</label><textarea id="ed-blocked" rows="3" placeholder="每行一个，或用 ; 分隔（命中即不转发，优先于关键词）">${esc((cfg.blocked || []).join('\n'))}</textarea></div>
       </div>
       <div class="row">
         <label class="sw"><input type="checkbox" id="ed-fk" ${((cfg.filters || {}).keyword !== false) ? 'checked' : ''}><span>关键词过滤</span></label>
         <label class="sw"><input type="checkbox" id="ed-fb" ${((cfg.filters || {}).blocked !== false) ? 'checked' : ''}><span>屏蔽词过滤</span></label>
-        <div class="field" style="margin:0"><label>扫描上限</label><input type="number" id="ed-limit" min="1" max="10000" value="${cfg.limit || 2000}" style="width:140px"></div>
+        <div class="field" style="margin:0"><label>扫描上限</label><input type="number" id="ed-limit" min="1" max="10000" value="${cfg.limit || 2000}" style="width:140px"><div class="hint">从起始时间往新方向数（未填起始时间则从频道最旧一条开始）</div></div>
       </div>`;
     }
     html += `<div class="grid3" style="align-items:flex-end">
@@ -478,6 +506,9 @@ async function dropTask(id, name) {
 let detailTimer = null;
 async function openTask(id) {
   detailId = id;
+  logFilter = '';                    // 换任务时回到「全部」
+  detailLogDate = '';                // 换任务时回到「今天」
+  detailLogDates = [];
   setDetailMode('view');
   showView('taskdetail');
   await loadTaskDetail(true);
@@ -486,7 +517,8 @@ async function loadTaskDetail(scroll) {
   if (!detailId) return;
   if (detailMode === 'edit') return;  // 编辑模式下不刷新/重置视图内容
   try {
-    const d = await api('/api/tasks/detail?id=' + encodeURIComponent(detailId));
+    const d = await api('/api/tasks/detail?id=' + encodeURIComponent(detailId)
+      + (detailLogDate ? ('&date=' + encodeURIComponent(detailLogDate)) : ''));
     const t = d.task, cfg = t.config || {}, s = t.stats || {};
     $('dt-name').innerHTML = esc(t.name) + ' <span class="pill k-' + t.kind + '">' + (t.kind === 'monitor' ? '实时监控' : '手动转发') + '</span> <span class="pill s-' + t.state + '">' + (STATE_LABEL[t.state] || t.state) + '</span>';
     $('dt-summary').textContent = t.summary + ' · ID ' + t.id;
@@ -497,7 +529,13 @@ async function loadTaskDetail(scroll) {
       if (t.state === 'running') acts.appendChild(mk('停用任务', 'warn', async () => { await monitorState(t.id, 'pause'); loadTaskDetail(); }));
       else if (t.state === 'paused') acts.appendChild(mk('恢复运行', 'ok', async () => { await monitorState(t.id, 'resume'); loadTaskDetail(); }));
     } else {
-      if (t.state === 'running') acts.appendChild(mk('取消任务', 'warn', async () => { await cancelManual(t.id); loadTaskDetail(); }));
+      if (t.state === 'running') {
+        acts.appendChild(mk('暂停', 'warn', async () => { await manualState(t.id, 'pause'); loadTaskDetail(); }));
+        acts.appendChild(mk('取消任务', 'danger', async () => { await cancelManual(t.id); loadTaskDetail(); }));
+      } else if (t.state === 'paused' || t.state === 'interrupted') {
+        const hasP = !!((cfg.progress || {}).stage);
+        acts.appendChild(mk(hasP ? '恢复（从断点继续）' : '恢复', 'ok', async () => { await manualState(t.id, 'resume'); loadTaskDetail(); }));
+      }
       acts.appendChild(mk('重新开始', 'ghost', async () => { await restartManual(t.id, t.name); loadTaskDetail(); }));
     }
     acts.appendChild(mk('编辑任务', 'ghost', async () => openEdit(t.id)));
@@ -515,14 +553,23 @@ async function loadTaskDetail(scroll) {
       items.push(['自带关键词', (cfg.keywords || []).length ? (cfg.keywords || []).join('、') : '用大类词表']);
       items.push(['自带屏蔽词', (cfg.blocked || []).length ? (cfg.blocked || []).join('、') : '用大类词表']);
     }
-    $('dt-stats').innerHTML = items.map(x => `<div class="it"><div class="k">${esc(x[0])}</div><div class="v" style="font-size:13.5px">${esc(x[1])}</div></div>`).join('');
+    if (t.kind === 'manual') {
+      items.splice(5, 0, ['当前阶段', PHASE_HINT[t.phase] || '—'], ['待转发', s.queued || 0]);
+      const pg = cfg.progress || {};
+      if (pg.stage) {
+        items.push(['进度断点', pg.stage === 'forward'
+          ? ('已记住转发到第 ' + (pg.pos || 0) + ' 条，点「恢复」接着发（不重扫）')
+          : ('已记住扫描到第 ' + ((pg.src || 0) + 1) + ' 个来源，点「恢复」接着扫（不重扫）')]);
+      }
+    }
+    $('dt-stats').innerHTML = items.map(x => `<div class="it"><div class="k">${esc(x[0])}</div><div class="v" style="font-size:15.5px">${esc(x[1])}</div></div>`).join('');
     const an = t.anchors || {};
     const aitems = an.items || [];
     $('dt-anchors').innerHTML = [
       ['去重频道数', an.channels || 0],
       ['已记录消息', an.messages || 0],
     ].map(x => `<div class="it"><div class="k">${x[0]}</div><div class="v">${x[1]}</div></div>`).join('')
-      + (aitems.length ? '<div style="grid-column:1/-1;font-size:12px;color:var(--muted)">按源频道：' + aitems.slice(0, 12).map(x => '频道 ' + x.chat_id + ' · ' + x.count + ' 条').join('；') + (aitems.length > 12 ? ' …' : '') + '</div>' : '');
+      + (aitems.length ? '<div style="grid-column:1/-1;font-size:14px;color:var(--muted)">按源频道：' + aitems.slice(0, 12).map(x => '频道 ' + x.chat_id + ' · ' + x.count + ' 条').join('；') + (aitems.length > 12 ? ' …' : '') + '</div>' : '');
     const aacts = $('dt-anchor-acts'); aacts.innerHTML = '';
     const mka = (text, cls, fn) => { const b = document.createElement('button'); b.className = 'btn ' + cls + ' sm'; b.textContent = text; b.onclick = fn; return b; };
     aacts.appendChild(mka('重置该任务锚点（强制重发）', 'warn', async () => {
@@ -530,6 +577,9 @@ async function loadTaskDetail(scroll) {
       try { await api('/api/anchors/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: 'task', id: t.id }) }); toast('已重置锚点', 'ok'); loadTaskDetail(); }
       catch (e) { toast('重置失败：' + e.message, 'err'); }
     }));
+    detailLogDates = (d.log && d.log.dates) || [];
+    detailLogDate = (d.log && d.log.date) || detailLogDate || todayStr();
+    renderLogDates();
     detailLines = (d.log && d.log.lines) || [];
     renderDetailLog();
     if (t.state === 'running') {
@@ -538,18 +588,118 @@ async function loadTaskDetail(scroll) {
     }
   } catch (e) { toast('详情加载失败：' + e.message, 'err'); }
 }
+/* 日志行格式：`[时间] [类别] 内容`（类别可缺省，旧日志就没有） */
+/* 类别：直转 / 下载转 / 屏蔽 / 未命中 / 失败；`跳过`、`成功` 是旧名，解析时归一化后兼容 */
+const LOG_LINE_RE = /^\[([^\]]*)\]\s*(?:\[(直转|下载转|成功|失败|跳过|未命中|屏蔽)\]\s*)?([\s\S]*)$/;
+const LOG_TAGS = [['', '全部'], ['直转', '直转'], ['下载转', '下载转'],
+  ['屏蔽', '屏蔽'], ['未命中', '未命中'], ['失败', '失败']];
+const TAG_CLS = { '直转': 'ok', '下载转': 'dl', '成功': 'ok', '失败': 'err',
+  '未命中': 'skip', '跳过': 'skip', '屏蔽': 'block' };
+function parseLogLine(l) {
+  const m = LOG_LINE_RE.exec(String(l == null ? '' : l));
+  if (!m) return { time: '', tag: '', text: l || '' };
+  let tag = m[2] || '';
+  if (tag === '跳过') tag = '未命中';      // 兼容改名前的旧日志
+  // 旧日志只有一个笼统的「成功」，分不出直转/下载转：保留原样，
+  // 这样它仍能在「全部」里看到（不会被误统计进「直转」）。
+  return { time: m[1] || '', tag: tag, text: m[3] || '' };
+}
+function setLogFilter(tag) { logFilter = tag || ''; renderDetailLog(); }
 function renderDetailLog() {
   const q = ($('dt-q').value || '').trim();
-  let lines = detailLines;
-  if (q) lines = lines.filter(l => l.includes(q));
-  $('dt-logcount').textContent = q ? ('匹配 ' + lines.length + ' / ' + detailLines.length + ' 行') : (detailLines.length + ' 行');
-  const html = lines.map(l => {
-    const e = esc(l);
-    return q ? e.split(esc(q)).join('<span class="hl">' + esc(q) + '</span>') : e;
-  }).join('\n');
+  const rows = detailLines.map(parseLogLine);
+  const counts = { '': rows.length };
+  rows.forEach(r => { if (r.tag) counts[r.tag] = (counts[r.tag] || 0) + 1; });
+  const tabs = $('dt-logtabs');
+  if (tabs) {
+    tabs.innerHTML = LOG_TAGS.map(([tag, label]) => {
+      const on = (logFilter === tag) ? ' on' : '';
+      const cls = TAG_CLS[tag] ? (' t-' + TAG_CLS[tag]) : '';
+      return '<button class="ltab' + on + cls + '" onclick="setLogFilter(\'' + tag + '\')">' +
+        label + '<b>' + (counts[tag] || 0) + '</b></button>';
+    }).join('');
+  }
+  let shown = logFilter ? rows.filter(r => r.tag === logFilter) : rows;
+  if (q) shown = shown.filter(r => (r.text + ' ' + r.tag + ' ' + r.time).indexOf(q) >= 0);
+  const filtering = !!logFilter || !!q;
+  $('dt-logcount').textContent = filtering
+    ? ('匹配 ' + shown.length + ' / ' + rows.length + ' 行')
+    : (rows.length + ' 行');
   const pre = $('dt-log');
-  pre.innerHTML = html || '（暂无日志）';
+  if (!shown.length) {
+    pre.innerHTML = filtering ? '（没有匹配的日志）' : '（暂无日志）';
+  } else {
+    pre.innerHTML = shown.map(r => {
+      // 显示「MM-DD HH:MM:SS」，从完整时间戳里去年份；悬停仍是完整时间
+      const short = r.time ? r.time.replace(/^\d{4}-/, '') : '';
+      const head = r.time ? '<span class="lt" title="' + esc(r.time) + '">' + esc(short) + '</span> ' : '';
+      const badge = r.tag ? '<span class="ltag t-' + TAG_CLS[r.tag] + '">' + esc(r.tag) + '</span> ' : '';
+      let body = esc(r.text);
+      if (q) body = body.split(esc(q)).join('<span class="hl">' + esc(q) + '</span>');
+      return head + badge + body;
+    }).join('\n');
+  }
   if ($('dt-follow').checked) pre.scrollTop = pre.scrollHeight;
+}
+
+/* ================= 日志日期选择 / 清理 ================= */
+function todayStr() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+    + '-' + String(d.getDate()).padStart(2, '0');
+}
+function logDateLabel(d) {
+  if (!d) return '';
+  if (d === todayStr()) return '今天 · ' + d;
+  return d;
+}
+function renderLogDates() {
+  const sel = $('dt-logdate');
+  if (!sel) return;
+  const day = detailLogDate || todayStr();
+  let opts = detailLogDates.slice();
+  if (opts.indexOf(day) < 0) opts = [day].concat(opts);
+  sel.innerHTML = opts.map(d =>
+    '<option value="' + d + '"' + (d === day ? ' selected' : '') + '>' + logDateLabel(d) + '</option>'
+  ).join('');
+  sel.value = day;
+}
+function setLogDate(d) {
+  detailLogDate = d || todayStr();
+  loadTaskDetail(true);
+}
+/* 清空全部后服务端会补一行说明，重新拉一次能看到 */
+async function reloadLogDays() {
+  detailLogDate = '';                 // 回到今天（今天一定存在）
+  await loadTaskDetail(true);
+  renderLogDates();
+}
+async function clearTaskLog(all) {
+  if (!detailId) return;
+  const day = detailLogDate || todayStr();
+  const msg = all
+    ? '确定清空该任务的【全部日期】日志？此操作不可恢复。'
+    : ('确定清空该任务【' + day + '】的日志？此操作不可恢复。');
+  if (!confirm(msg)) return;
+  try {
+    await api('/api/tasks/log/clear', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(all ? { id: detailId } : { id: detailId, date: day })
+    });
+    toast(all ? '该任务日志已清空' : (day + ' 的日志已清空'), 'ok');
+    await reloadLogDays();
+  } catch (e) { toast('清理失败：' + e.message, 'err'); }
+}
+async function clearAllLogs() {
+  if (!confirm('确定清空【所有任务】的全部日志？任务本身、统计与锚点不受影响。此操作不可恢复。')) return;
+  try {
+    const r = await api('/api/tasks/log/clear', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: '*' })
+    });
+    toast('已清空全部任务日志（共 ' + ((r && r.cleared) || 0) + ' 行）', 'ok');
+    loadTasks();
+  } catch (e) { toast('清理失败：' + e.message, 'err'); }
 }
 
 /* ================= 频道选择（可搜索 + 勾选，与词表体验一致） ================= */
@@ -799,21 +949,51 @@ async function wordLoad(t) {
     updatePreview(t);
   } catch (e) { $(wKey(t) + '-status').textContent = '加载失败'; }
 }
+function wordQuery(t) { return ($(wKey(t) + '-input').value || '').trim().toLowerCase(); }
 function wordRender(t) {
-  const q = ($(wKey(t) + '-filter').value || '').trim().toLowerCase();
+  const q = wordQuery(t);
   const all = wordCache[t] || [];
   const items = q ? all.filter(w => w.toLowerCase().includes(q)) : all;
   const sel = wordSelection[t];
   $(wKey(t) + '-list').innerHTML = items.length ? items.map(w => {
     const on = sel.has(w);
     return `<label class="witem ${on ? 'sel' : ''}"><input type="checkbox" ${on ? 'checked' : ''} onchange="wordToggle('${t}', ${JSON.stringify(w).replace(/"/g, '&quot;')}, this.checked)">${esc(w)}</label>`;
-  }).join('') : '<div class="empty" style="width:100%">' + (q ? '没有匹配的词条' : '词表还是空的，上面添加吧') + '</div>';
+  }).join('') : '<div class="empty" style="width:100%">' + (q ? '没有这个词条 —— 回车或点「添加」即可加入' : '词表还是空的，上面添加吧') + '</div>';
   $(wKey(t) + '-status').textContent = (q ? '匹配 ' + items.length + ' / 共 ' + all.length : '共 ' + all.length + ' 个')
     + (sel.size ? ' · 已选 ' + sel.size : '');
+  wordHint(t);
 }
+/* 输入框即「筛选框 + 添加框」：实时告诉用户这个词在不在表里 */
+function wordHint(t) {
+  const el = $(wKey(t) + '-hint');
+  if (!el) return;
+  const raw = ($(wKey(t) + '-input').value || '').trim();
+  const label = t === 'blocked' ? '屏蔽词' : '关键词';
+  if (!raw) {
+    el.className = 'whint';
+    el.textContent = '输入' + label + '：在表里会立刻筛出来；不在表里，回车就直接加进去。可用 ; ， 、 或换行一次加多个。';
+    return;
+  }
+  const exist = new Set(wordCache[t] || []);
+  const words = splitWordInput(raw);
+  const dup = words.filter(w => exist.has(w));
+  const miss = words.filter(w => !exist.has(w));
+  if (words.length === 1 && dup.length) {
+    el.className = 'whint exists';
+    el.innerHTML = '<b>✓ 已存在</b>：' + esc(dup[0]) + '　<span class="muted">下方列表已筛出该词条，可勾选后「删除所选」</span>';
+  } else if (words.length === 1) {
+    el.className = 'whint missing';
+    el.innerHTML = '<b>＋ 不在词表中</b>：' + esc(miss[0]) + '　<span class="muted">回车或点「添加」即加入</span>';
+  } else {
+    el.className = 'whint ' + (miss.length ? 'missing' : 'exists');
+    el.innerHTML = '<b>' + words.length + ' 个词条</b>：已存在 ' + dup.length + ' 个，待添加 ' + miss.length + ' 个'
+      + (miss.length ? '（' + esc(miss.slice(0, 8).join('、')) + (miss.length > 8 ? ' …' : '') + '）' : '');
+  }
+}
+function wordInput(t) { wordRender(t); }
 function wordToggle(t, w, on) { on ? wordSelection[t].add(w) : wordSelection[t].delete(w); wordRender(t); }
 function wordToggleAll(t, btn) {
-  const q = ($(wKey(t) + '-filter').value || '').trim().toLowerCase();
+  const q = wordQuery(t);
   const items = (wordCache[t] || []).filter(w => !q || w.toLowerCase().includes(q));
   const allSel = items.length && items.every(w => wordSelection[t].has(w));
   items.forEach(w => allSel ? wordSelection[t].delete(w) : wordSelection[t].add(w));
@@ -822,13 +1002,23 @@ function wordToggleAll(t, btn) {
 }
 async function wordAdd(t) {
   const input = $(wKey(t) + '-input');
-  const v = input.value.trim();
-  if (!v) return;
+  const raw = input.value.trim();
+  if (!raw) { toast('先输入要添加的词条', 'err'); return; }
+  const label = t === 'blocked' ? '屏蔽词' : '关键词';
+  const words = splitWordInput(raw);
+  const exist = new Set(wordCache[t] || []);
+  const add = words.filter(w => !exist.has(w));
+  const dup = words.filter(w => exist.has(w));
+  if (!add.length) {                     // 全都已经在表里 —— 只提示，不重复写文件
+    toast('已存在，无需重复添加：' + dup.join('、'));
+    wordRender(t);
+    return;
+  }
   try {
-    await api('/api/words', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: t, scope: currentScope(), action: 'add', words: [v] }) });
+    await api('/api/words', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: t, scope: currentScope(), action: 'add', words: add }) });
     input.value = '';
     await wordLoad(t);
-    toast('已添加：' + v, 'ok');
+    toast('已添加 ' + add.length + ' 个' + label + (dup.length ? '（' + dup.length + ' 个已存在，已跳过）' : ''), 'ok');
   } catch (e) { toast('添加失败：' + e.message, 'err'); }
 }
 async function wordRemoveSel(t) {

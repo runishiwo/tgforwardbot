@@ -18,12 +18,17 @@
 
       <div class="card" id="dt-log-card">
         <h2>该任务日志</h2>
+        <p class="cardsub">日志按天分文件保存（每天一个日期）。默认显示当天，可选择查看历史日期；「自动刷新」只对当天有效。</p>
         <div class="logbar">
           <input type="text" class="grow" id="dt-q" placeholder="在日志里搜索…" oninput="renderDetailLog()">
+          <select id="dt-logdate" class="datesel" onchange="setLogDate(this.value)" title="选择要查看的日志日期"></select>
           <label class="counter"><input type="checkbox" id="dt-follow" checked> 自动刷新</label>
           <span class="counter" id="dt-logcount"></span>
           <button class="btn ghost sm" onclick="loadTaskDetail(true)">刷新</button>
+          <button class="btn danger sm" onclick="clearTaskLog(false)">清理当日</button>
+          <button class="btn danger sm" onclick="clearTaskLog(true)">清空全部</button>
         </div>
+        <div class="logtabs" id="dt-logtabs"></div>
         <pre class="logpre" id="dt-log"></pre>
       </div>
 

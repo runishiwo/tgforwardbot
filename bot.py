@@ -8,6 +8,7 @@ import asyncio
 import collections
 import logging
 import os
+import shutil
 import sqlite3
 import time
 from datetime import datetime
@@ -16,7 +17,7 @@ from logging.handlers import TimedRotatingFileHandler
 from telethon import TelegramClient, events, utils
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
-from core import BASE_DIR, print_ts, read_lines
+from core import BASE_DIR, TAG_FAIL, TAG_SKIP, err_text, print_ts, read_lines
 from monitor import MonitorTaskManager
 from stats import StatsStore
 from tasks import (MANUAL, MONITOR, RETENTION_DEFAULT, STATE_LABEL, AnchorStore,
@@ -36,9 +37,14 @@ class ForwardBot:
         self.reload_interval = config.get('reload_interval', 60)
         self.forward_interval = config.get('forward_interval', 5)
         self.max_retries = config.get('max_retries', 3)
+        # 受保护媒体的「下载 / 上传」单次超时（秒）。家里网络慢、视频较大时 180 秒常常不够，
+        # 一超时整条消息就永远发不出去（还被无限重试钉在队头）。默认放宽到 15 分钟。
+        self.media_timeout = max(60, int(config.get('media_timeout', 900)))
         self.album_scan_limit = config.get('album_scan_limit', 50)
         self.log_cleanup_interval = config.get('log_cleanup_interval', 6 * 3600)
         self.session_name = config.get('session_name', 'session_session')
+        # 自己创建的频道 id 集合（懒加载缓存），「监听全部频道」时用它排除自有频道
+        self._own_channel_ids = None
 
         self.log_dir = os.path.abspath(config.get('log_dir', 'log'))
         os.makedirs(self.log_dir, exist_ok=True)
@@ -153,6 +159,35 @@ class ForwardBot:
     def queue_size(self):
         return sum(t.queue.qsize() for t in self.monitors.tasks.values())
 
+    async def own_channel_ids(self, refresh=False):
+        """自己创建的频道 id 集合（带缓存）。
+
+        「来源频道留空 = 监听所有频道」时要排除这些频道：手动转发把消息投进自有频道后，
+        不该被实时任务再捞一遍（否则会重复转发）。
+        """
+        if self._own_channel_ids is not None and not refresh:
+            return self._own_channel_ids
+        ids = set()
+        try:
+            async for dialog in self.client.iter_dialogs():
+                ent = getattr(dialog, 'entity', None)
+                if ent is None or not getattr(ent, 'broadcast', False):
+                    continue
+                if getattr(ent, 'creator', False):
+                    ids.add(self.peer_id(ent))
+        except Exception as exc:
+            logging.warning('统计「自己创建的频道」失败：%s', exc)
+            if self._own_channel_ids is not None:
+                return self._own_channel_ids
+            return set()
+        if self._own_channel_ids is None:
+            logging.info('自己创建的频道共 %d 个（「监听全部频道」时会自动排除）', len(ids))
+        self._own_channel_ids = ids
+        return ids
+
+    async def is_own_channel(self, chat_id):
+        return chat_id in await self.own_channel_ids()
+
     def task_counts(self):
         store = self.task_store
         return {
@@ -257,85 +292,136 @@ class ForwardBot:
     async def _resend_single(self, m, dest):
         # 先尝试引用重发（普通频道秒转、零磁盘）；
         # 受保护频道的媒体引用会被服务器拒绝，自动降级：下载到本地再作为新文件上传。
+        # 返回值说明本条消息实际走的路径：
+        #   'direct'   —— 直接转发（文本直发 / 引用重发 / forward_messages），不落本机磁盘；
+        #   'download' —— 降级为「下载到本机再上传」，慢但能绕过引用限制。
+        # 上层据此把「成功」日志分成「直转」和「下载转」两类。
         text = m.message or ''
         if m.media is None:
             await self.client.send_message(dest, text)
-            return
+            return 'direct'
         if isinstance(m.media, (MessageMediaPhoto, MessageMediaDocument)):
             try:
                 await asyncio.wait_for(self.client.send_file(dest, m.media, caption=text or ''),
-                                       timeout=180)
-                return
+                                       timeout=self.media_timeout)
+                return 'direct'
             except Exception as e:
                 if not self._is_protected_error(e):
                     raise
                 logging.info('消息ID %s 媒体引用重发受限，降级为下载后重传...', m.id)
             logging.info('消息ID %s 开始下载媒体', m.id)
             path = await asyncio.wait_for(self.client.download_media(m, file=self.tmp_media_dir),
-                                          timeout=180)
+                                          timeout=self.media_timeout)
             if not path:
                 raise RuntimeError('消息ID %s 媒体下载返回空路径' % m.id)
             logging.info('消息ID %s 媒体下载完成，开始上传', m.id)
             try:
                 await asyncio.wait_for(self.client.send_file(dest, path, caption=text or ''),
-                                       timeout=180)
+                                       timeout=self.media_timeout)
                 logging.info('消息ID %s 媒体上传完成', m.id)
             finally:
                 try:
                     os.remove(path)
                 except OSError:
                     pass
-        else:
-            # 投票/位置/联系人等没有可下载的文件，只能 forward，受限时由上层捕获
-            await self.client.forward_messages(dest, m)
+            return 'download'
+        # 投票/位置/联系人等没有可下载的文件，只能 forward，受限时由上层捕获
+        await self.client.forward_messages(dest, m)
+        return 'direct'
 
-    async def deliver(self, chat, message, dests, log=None):
-        """把一条消息投递到任务自己的目的频道列表；返回是否成功。"""
+    async def deliver(self, chat, message, dests, log=None, retry_forever=False, gate=None,
+                      lock=None):
+        """把一条消息投递到任务自己的目的频道列表。
+
+        返回值：
+          False       —— 投递失败（超过重试次数，或受保护且降级也失败）；
+          'direct'    —— 成功，且**全程直接转发**（未落本机磁盘）；
+          'download'  —— 成功，但其中至少有一条消息走了「下载后重新上传」的降级路径。
+        上层用这个返回值把日志分成「直转」/「下载转」两类（`if ok:` 依然成立）。
+
+        retry_forever=True 时，单条消息失败会**一直重试**（退避最长 60 秒）而不是放弃——
+        手动转发用这个模式：宁可慢慢发，也不要把消息丢掉。
+        gate 是可选协程（如「等待任务恢复」），每次重试前先 await，保证暂停能被尊重。
+        lock 是可选 asyncio.Lock：**只在真正发送的那一下持锁**，重试退避期间让出，
+        这样一条卡住的消息不会把其它任务的发送/暂停也堵死。
+        """
         dests = [d for d in (dests or []) if d is not None]
         if not dests:
             if log:
-                log('该任务没有可用的目的频道，跳过消息 %s' % getattr(message, 'id', '?'))
+                log('该任务没有可用的目的频道，跳过消息 %s' % getattr(message, 'id', '?'),
+                    tag=TAG_SKIP)
             return False
         retries = 0
         sent_ids = set()
         last_error = None
-        while retries < self.max_retries:
+
+        async def _attempt():
+            """投递一轮；返回 'direct' / 'download'（只要有一条走下载重传就算 download）。"""
+            pending = [d for d in dests if self._dest_id(d) not in sent_ids]
+            if not pending:
+                return 'direct'
+            kinds = set()
+            for dest in pending:
+                if message.grouped_id:
+                    # 相册内各条消息的 id 是连续的：以本条为中心取一个小窗口即可整组找回，
+                    # 与它在频道里的位置无关（因此历史里较早的相册也能整组转发）。
+                    span = 12
+                    msg_ids = []
+                    async for msg in self.client.iter_messages(
+                            chat, min_id=message.id - span - 1,
+                            max_id=message.id + span + 1, limit=span * 2 + 2):
+                        if msg is not None and msg.grouped_id == message.grouped_id:
+                            msg_ids.append(msg.id)
+                    if message.id not in msg_ids:
+                        msg_ids.append(message.id)
+                    msg_ids.sort()
+                    album = await self.client.get_messages(chat, ids=msg_ids)
+                    for m in album:
+                        if m is not None:
+                            kinds.add(await self._resend_single(m, dest))
+                else:
+                    kinds.add(await self._resend_single(message, dest))
+                sent_ids.add(self._dest_id(dest))
+            return 'download' if 'download' in kinds else 'direct'
+
+        while True:
+            if not retry_forever and retries >= self.max_retries:
+                break
             try:
-                pending = [d for d in dests if self._dest_id(d) not in sent_ids]
-                if not pending:
-                    return True
-                for dest in pending:
-                    if message.grouped_id:
-                        msg_ids = []
-                        async for msg in self.client.iter_messages(chat, limit=self.album_scan_limit):
-                            if msg.grouped_id == message.grouped_id:
-                                msg_ids.append(msg.id)
-                            elif msg_ids:
-                                break
-                        if message.id not in msg_ids:
-                            msg_ids.append(message.id)
-                        msg_ids.sort()
-                        album = await self.client.get_messages(chat, ids=msg_ids)
-                        for m in album:
-                            if m is not None:
-                                await self._resend_single(m, dest)
-                    else:
-                        await self._resend_single(message, dest)
-                    sent_ids.add(self._dest_id(dest))
-                return True
+                if lock is not None:
+                    async with lock:
+                        kind = await _attempt()
+                else:
+                    kind = await _attempt()
+                return kind
             except Exception as e:
                 if self._is_protected_error(e):
                     if log:
-                        log('消息 %s 受保护且降级重传失败，跳过：%s' % (message.id, e))
+                        log('消息 %s 受保护且降级重传失败，跳过：%s' % (message.id, e),
+                            tag=TAG_FAIL)
                     return False
                 last_error = e
                 retries += 1
-                if log:
-                    log('消息 %s 转发失败（第 %d 次重试）：%s' % (message.id, retries, e))
-                logging.error('转发消息ID %s 失败，第 %d 次重试，原因：%s', message.id, retries, e)
-                await asyncio.sleep(3)
+                if retry_forever:
+                    delay = min(3 * retries, 60)
+                    # 无限重试时日志只记前 10 次、之后每 10 次记一条，避免刷屏
+                    if log and (retries <= 10 or retries % 10 == 0):
+                        log('消息 %s 转发失败（第 %d 次重试，%d 秒后再试）：%s'
+                            % (message.id, retries, delay, err_text(e)), tag=TAG_FAIL)
+                    logging.warning('转发消息ID %s 失败，第 %d 次重试（持续重试不放弃），%d 秒后再试，原因：%s',
+                                    message.id, retries, delay, e)
+                else:
+                    delay = 3
+                    if log:
+                        log('消息 %s 转发失败（第 %d 次重试）：%s'
+                            % (message.id, retries, err_text(e)), tag=TAG_FAIL)
+                    logging.error('转发消息ID %s 失败，第 %d 次重试，原因：%s', message.id, retries, e)
+                if gate is not None:
+                    await gate()
+                await asyncio.sleep(delay)
         if log:
-            log('消息 %s 超过最大重试次数(%d)，放弃：%s' % (message.id, self.max_retries, last_error))
+            log('消息 %s 超过最大重试次数(%d)，放弃：%s' % (message.id, self.max_retries, last_error),
+                tag=TAG_FAIL)
         logging.error('消息ID %s 转发失败，超过最大重试次数(%d)。', message.id, self.max_retries)
         return False
 
@@ -463,6 +549,10 @@ class ForwardBot:
             except Exception as exc:
                 logging.error('日志清理失败: %s', exc)
             try:
+                await self.own_channel_ids(refresh=True)     # 顺手刷新自建频道集合
+            except Exception as exc:
+                logging.warning('刷新自建频道集合失败: %s', exc)
+            try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
@@ -480,7 +570,33 @@ class ForwardBot:
                 self.task_log.append(task['id'], '已按「日志保留 %d 天」清理 %d 行历史日志' % (keep, n))
         if dropped:
             print_ts('日志清理完成：共清理 %d 行超期日志' % dropped)
+        self._purge_orphan_files()
         return dropped
+
+    def _purge_orphan_files(self):
+        """清掉已删除任务遗留的文件：续跑队列 `log/tasks/<id>.queue` 与日志目录 `log/tasks/<id>/`。"""
+        ids = {t['id'] for t in self.task_store.all()}
+        folder = os.path.join(BASE_DIR, 'log', 'tasks')
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            return
+        for name in names:
+            path = os.path.join(folder, name)
+            if name.endswith('.queue'):
+                if name[:-len('.queue')] not in ids:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            elif name.endswith('.log'):
+                if name[:-len('.log')] not in ids:      # 旧格式孤儿文件
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            elif os.path.isdir(path) and name not in ids:
+                shutil.rmtree(path, ignore_errors=True)
 
     # ---------------- 生命周期 ----------------
     def _log_word_rules(self):
@@ -514,12 +630,15 @@ class ForwardBot:
             print_ts('Telegram 尚未登录，请通过 WebUI 的 Telegram 登录页面完成登录。')
             return False
         self.telegram_authorized = True
+        self.task_log.migrate()          # 旧版单文件日志 → 按日分文件的目录结构
         await self._ensure_default_task()
         self._log_word_rules()
         self._log_task_summary()
         print_ts('开始监听频道消息，按各任务规则过滤后转发（多任务并行）...')
         self.stop_event.clear()
         self._start_tasks()
+        # 预热「自己创建的频道」缓存，避免第一条自有频道消息才去遍历 dialogs
+        asyncio.create_task(self.own_channel_ids())
         self.connection_state = 'connected' if self.client.is_connected() else 'disconnected'
         self.connection_monitor_task = asyncio.create_task(self._connection_monitor())
         self.recovery_init_task = asyncio.create_task(self._initialize_recovery())
