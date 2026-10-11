@@ -2,7 +2,7 @@
 
 > 一个自托管的 Telegram 消息转发机器人：**实时监听转发 + 手动历史转发**，多任务并行、可视化 Web 管理台、按源频道锚点去重、分大类词表过滤。
 
-基于 [Telethon](https://github.com/LonamiWebs/Telethon) + [aiohttp](https://docs.aiohttp.org/) + SQLite，纯 Python，无需额外框架，一条命令即可部署。
+基于 [Telethon](https://codeberg.org/Lonami/Telethon) + [aiohttp](https://docs.aiohttp.org/) + SQLite，纯 Python，无需额外框架，一条命令即可部署。
 
 ---
 
