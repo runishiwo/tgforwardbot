@@ -14,10 +14,15 @@ import time
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 
-from telethon import TelegramClient, events, utils
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+from telethon import TelegramClient, events, functions, utils
+from telethon.tl import types
+from telethon.tl.types import (DocumentAttributeVideo, MessageMediaDocument,
+                               MessageMediaPhoto, MessageService, PhotoCachedSize,
+                               PhotoSize, PhotoSizeProgressive)
 
 from core import BASE_DIR, TAG_FAIL, TAG_SKIP, err_text, print_ts, read_lines
+from fastio import Fallback as FastFallback
+import fastio
 from monitor import MonitorTaskManager
 from stats import StatsStore
 from tasks import (MANUAL, MONITOR, RETENTION_DEFAULT, STATE_LABEL, AnchorStore,
@@ -37,9 +42,14 @@ class ForwardBot:
         self.reload_interval = config.get('reload_interval', 60)
         self.forward_interval = config.get('forward_interval', 5)
         self.max_retries = config.get('max_retries', 3)
+        # 无限重试模式下，单条消息连续失败这么多次就放弃（记入待补发），
+        # 防止一条水远发不出去的消息把整个串行队列钉死。0 = 真正无限。
+        self.retry_limit = max(0, int(config.get('retry_limit', 30)))
         # 受保护媒体的「下载 / 上传」单次超时（秒）。家里网络慢、视频较大时 180 秒常常不够，
         # 一超时整条消息就永远发不出去（还被无限重试钉在队头）。默认放宽到 15 分钟。
         self.media_timeout = max(60, int(config.get('media_timeout', 900)))
+        # 大媒体下载/上传的并发分片数（Telethon 原生是串行分片，高延迟链路下浪费带宽）
+        self.media_concurrency = max(1, min(64, int(config.get('transfer_concurrency', 16))))
         self.album_scan_limit = config.get('album_scan_limit', 50)
         self.log_cleanup_interval = config.get('log_cleanup_interval', 6 * 3600)
         self.session_name = config.get('session_name', 'session_session')
@@ -289,61 +299,248 @@ class ForwardBot:
         return ('forwardsrestricted' in t or 'protected' in t
                 or 'noforwards' in t or 'filereference' in t)
 
-    async def _resend_single(self, m, dest):
+    @staticmethod
+    def _has_content(m):
+        """这条消息有没有可转发的内容。
+
+        频道里的**服务消息**（频道创建 / 置顶 / 加入 / 改名…，`MessageService`）既没有
+        文字也没有媒体；此外还可能有 text 为空又无媒体的空消息。硬发这类消息会被服务器
+        拒绝（`The message cannot be empty unless a file is provided`），在「无限重试」
+        模式下会把整个串行队列堵死 —— 所以必须提前识别出来跳过。
+        """
+        if isinstance(m, MessageService):
+            return False
+        if getattr(m, 'media', None) is not None:
+            return True
+        return bool((getattr(m, 'message', '') or '').strip())
+
+    @staticmethod
+    def _carry_attributes(doc):
+        """把源文档的属性原样带过去（时长 / 尺寸 / 文件名 / 语音 / 贴纸 …）。
+
+        为什么要带：受保护媒体只能「下载到本地 → 重新上传」，而本地文件没有任何
+        元数据，Telegram 服务器**不会**自己算时长，Telethon 也只在装了 hachoir 时
+        才探测（远程没装）→ 不带属性重传的视频会退化成 `duration=0`，客户端就不显示时长。
+        """
+        if doc is None:
+            return None
+        out = []
+        for a in (doc.attributes or []):
+            if isinstance(a, DocumentAttributeVideo):
+                # 重传后仍可边下边播（源可能没开流式）
+                out.append(DocumentAttributeVideo(
+                    duration=a.duration, w=a.w, h=a.h,
+                    round_message=a.round_message,
+                    supports_streaming=True, nosound=a.nosound))
+            else:
+                out.append(a)
+        return out or None
+
+    @staticmethod
+    def _pick_thumb(doc):
+        """挑源文档里最大的**静态**缩略图（跳过模糊预览与视频缩略图），没有则 None。
+
+        只挑 PhotoSize 系，避免把 VideoSize（动图封面）当 thumb 上传时出问题。
+        """
+        best = None
+        best_size = -1
+        for t in (getattr(doc, 'thumbs', None) or []):
+            if isinstance(t, PhotoSizeProgressive):
+                size = max(t.sizes) if t.sizes else -1
+            elif isinstance(t, PhotoSize):
+                size = getattr(t, 'size', 0) or 0
+            elif isinstance(t, PhotoCachedSize):
+                size = len(getattr(t, 'bytes', b'') or b'')
+            else:
+                continue
+            if size > best_size:
+                best, best_size = t, size
+        return best
+
+    async def _download_thumb(self, m, doc):
+        """下载源消息的封面（缩略图）；没有或失败都返回 None（不阻断转发）。"""
+        picked = self._pick_thumb(doc)
+        if picked is None:
+            return None
+        try:
+            return await asyncio.wait_for(
+                self.client.download_media(m, file=self.tmp_media_dir, thumb=picked),
+                timeout=self.media_timeout)
+        except Exception as exc:
+            logging.info('消息ID %s 缩略图下载失败，忽略：%s', getattr(m, 'id', '?'), err_text(exc))
+            return None
+
+    async def _download_media_fast(self, m):
+        """并发分片下载；协议不支持或异常时回退 Telethon 原生串行下载。"""
+        try:
+            return await asyncio.wait_for(
+                fastio.fast_download(self.client, m, self.tmp_media_dir,
+                                     concurrency=self.media_concurrency),
+                timeout=self.media_timeout)
+        except FastFallback:
+            logging.info('消息ID %s 走 CDN 或协议限制，回退原生下载', m.id)
+        except asyncio.TimeoutError:
+            raise
+        except Exception as e:
+            logging.info('消息ID %s 并发下载失败，回退原生下载：%s', m.id, err_text(e))
+        return await asyncio.wait_for(self.client.download_media(m, file=self.tmp_media_dir),
+                                      timeout=self.media_timeout)
+
+    async def _upload_media_fast(self, m, dest, path, caption, attrs, thumb_path, mime):
+        """并发分片上传（把 InputFile 直接交给 send_file）；异常时回退原生整文件上传。"""
+        try:
+            input_file = await asyncio.wait_for(
+                fastio.fast_upload(self.client, path,
+                                   concurrency=self.media_concurrency),
+                timeout=self.media_timeout)
+            await asyncio.wait_for(
+                self.client.send_file(dest, input_file, caption=caption,
+                                      attributes=attrs, thumb=thumb_path, mime_type=mime),
+                timeout=self.media_timeout)
+            return
+        except asyncio.TimeoutError:
+            raise
+        except Exception as e:
+            logging.info('消息ID %s 并发上传失败，回退原生上传：%s', m.id, err_text(e))
+        await asyncio.wait_for(
+            self.client.send_file(dest, path, caption=caption,
+                                  attributes=attrs, thumb=thumb_path, mime_type=mime),
+            timeout=self.media_timeout)
+
+    async def _resend_single(self, m, dest, local=None, keep=None):
         # 先尝试引用重发（普通频道秒转、零磁盘）；
         # 受保护频道的媒体引用会被服务器拒绝，自动降级：下载到本地再作为新文件上传。
         # 返回值说明本条消息实际走的路径：
         #   'direct'   —— 直接转发（文本直发 / 引用重发 / forward_messages），不落本机磁盘；
         #   'download' —— 降级为「下载到本机再上传」，慢但能绕过引用限制。
         # 上层据此把「成功」日志分成「直转」和「下载转」两类。
+        #
+        # local: (path, thumb_path) —— deliver 重试时复用上次已下载的文件，不再整文件重下。
+        # keep: deliver 传进来的缓存 dict；一下载完就登记，**上传失败重试时也能复用**。
+        # 返回 (kind, None)：kind 见上。新下载的文件不在这里删除，由 deliver 统一清理。
         text = m.message or ''
+        if not self._has_content(m):
+            return 'empty', None         # 服务消息 / 空消息：没有可转发的内容
         if m.media is None:
             await self.client.send_message(dest, text)
-            return 'direct'
+            return 'direct', None
         if isinstance(m.media, (MessageMediaPhoto, MessageMediaDocument)):
             try:
                 await asyncio.wait_for(self.client.send_file(dest, m.media, caption=text or ''),
                                        timeout=self.media_timeout)
-                return 'direct'
+                return 'direct', None
             except Exception as e:
                 if not self._is_protected_error(e):
                     raise
                 logging.info('消息ID %s 媒体引用重发受限，降级为下载后重传...', m.id)
-            logging.info('消息ID %s 开始下载媒体', m.id)
-            path = await asyncio.wait_for(self.client.download_media(m, file=self.tmp_media_dir),
-                                          timeout=self.media_timeout)
-            if not path:
-                raise RuntimeError('消息ID %s 媒体下载返回空路径' % m.id)
-            logging.info('消息ID %s 媒体下载完成，开始上传', m.id)
-            try:
-                await asyncio.wait_for(self.client.send_file(dest, path, caption=text or ''),
-                                       timeout=self.media_timeout)
-                logging.info('消息ID %s 媒体上传完成', m.id)
-            finally:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-            return 'download'
+            # 本地文件没有元数据：必须显式把源文档的属性与封面（缩略图）带回去，
+            # 否则重传后的视频「无时长、无封面」，别的文档也会丢文件名。
+            doc = getattr(m, 'document', None)
+            attrs = self._carry_attributes(doc)
+            if local:
+                path, thumb_path = local           # 重试复用：只重传，不重下
+            else:
+                logging.info('消息ID %s 开始下载媒体', m.id)
+                path = await self._download_media_fast(m)
+                if not path:
+                    raise RuntimeError('消息ID %s 媒体下载返回空路径' % m.id)
+                thumb_path = await self._download_thumb(m, doc)
+                if keep is not None:
+                    keep[m.id] = (path, thumb_path)   # 立即登记：上传失败重试也不用重下
+            logging.info('消息ID %s 媒体下载就绪，开始上传', m.id)
+            await self._upload_media_fast(m, dest, path, text or '', attrs,
+                                          thumb_path, getattr(doc, 'mime_type', None))
+            logging.info('消息ID %s 媒体上传完成', m.id)
+            return 'download', None
         # 投票/位置/联系人等没有可下载的文件，只能 forward，受限时由上层捕获
         await self.client.forward_messages(dest, m)
-        return 'direct'
+        return 'direct', None
+
+    async def _send_album_direct(self, dest, members):
+        """整组引用重发（普通频道）：一条 RPC 发出完整相册，保留分组与原 caption。"""
+        await asyncio.wait_for(
+            self.client.send_file(dest, [m.media for m in members],
+                                  caption=[(m.message or '') for m in members]),
+            timeout=max(self.media_timeout, 120) * len(members))
+
+    async def _send_album_download(self, dest, members, keep=None):
+        """受保护频道：把整组下载到本地后作为相册重新上传。
+
+        自己构造 SendMultiMediaRequest（Telethon 的 send_file(list) 不带
+        attributes/thumb/mime 参数，重传会丢时长/封面），每个成员：
+        fast_upload → InputFileBig + 源属性 + 最大静态封面。
+        照片成员走 InputMediaUploadedPhoto（不需要属性/封面）。
+        keep: {消息 id: (path, thumb_path)} —— 下载完立即登记，重试复用。
+        """
+        singles = []
+        paths = []
+        for m in members:
+            doc = getattr(m, 'document', None)
+            if keep is not None and m.id in keep:
+                path, thumb_path = keep[m.id]
+            else:
+                path = await self._download_media_fast(m)
+                if not path:
+                    raise RuntimeError('消息ID %s 媒体下载返回空路径' % m.id)
+                thumb_path = await self._download_thumb(m, doc) if doc is not None else None
+                if keep is not None:
+                    keep[m.id] = (path, thumb_path)
+            paths.append((path, thumb_path))
+            input_file = await fastio.fast_upload(self.client, path,
+                                                  concurrency=self.media_concurrency)
+            if doc is not None:
+                thumb_file = None
+                if thumb_path:
+                    thumb_file = await self.client.upload_file(thumb_path)
+                # 流式播放由 attributes 里的 DocumentAttributeVideo(supports_streaming=True)
+                # 决定（_carry_attributes 已强制），InputMediaUploadedDocument 本身没这个参数。
+                media = types.InputMediaUploadedDocument(
+                    file=input_file,
+                    mime_type=getattr(doc, 'mime_type', None) or 'application/octet-stream',
+                    attributes=self._carry_attributes(doc),
+                    thumb=thumb_file)
+            else:
+                media = types.InputMediaUploadedPhoto(file=input_file)
+            singles.append(types.InputSingleMedia(
+                media=media, message=m.message or ''))
+        try:
+            await asyncio.wait_for(
+                self.client(functions.messages.SendMultiMediaRequest(
+                    dest, multi_media=singles)),
+                timeout=max(self.media_timeout, 120) * len(members))
+        finally:
+            if keep is None:
+                for path, thumb_path in paths:
+                    for leftover in (path, thumb_path):
+                        if leftover:
+                            try:
+                                os.remove(leftover)
+                            except OSError:
+                                pass
 
     async def deliver(self, chat, message, dests, log=None, retry_forever=False, gate=None,
-                      lock=None):
+                      lock=None, retry_limit=None, on_sent=None):
         """把一条消息投递到任务自己的目的频道列表。
 
         返回值：
-          False       —— 投递失败（超过重试次数，或受保护且降级也失败）；
+          False       —— 投递失败（超过重试次数 / 重试上限，或受保护且降级也失败）；
           'direct'    —— 成功，且**全程直接转发**（未落本机磁盘）；
-          'download'  —— 成功，但其中至少有一条消息走了「下载后重新上传」的降级路径。
-        上层用这个返回值把日志分成「直转」/「下载转」两类（`if ok:` 依然成立）。
+          'download'  —— 成功，但其中至少有一条消息走了「下载后重新上传」的降级路径；
+          'empty'     —— 这条消息没有任何可转发内容（服务消息 / 空消息），已跳过。
+        上层用这个返回值把日志分成「直转」/「下载转」两类（`if ok:` 依然成立）；
+        **注意 `'empty'` 也是真值**，要显式先判它，别再当成「成功」计数。
 
-        retry_forever=True 时，单条消息失败会**一直重试**（退避最长 60 秒）而不是放弃——
-        手动转发用这个模式：宁可慢慢发，也不要把消息丢掉。
+        retry_forever=True 时，单条消息失败会一直重试（退避最长 60 秒）——但连续失败
+        `retry_limit` 次后**放弃**（默认 30 次，见 `self.retry_limit`，0 = 真正无限），
+        防止一条永远发不出去的消息把串行队列钉死。放弃时返回 False，上层记 failed。
         gate 是可选协程（如「等待任务恢复」），每次重试前先 await，保证暂停能被尊重。
         lock 是可选 asyncio.Lock：**只在真正发送的那一下持锁**，重试退避期间让出，
         这样一条卡住的消息不会把其它任务的发送/暂停也堵死。
+        on_sent 是可选回调 `on_sent(ids, grouped_id)`：相册整组发送成功后回调，
+        参数是本组全部消息 id 与 grouped_id（供上层推进锚点、清组去重标记）。
+
+        重试会**复用上次已下载的媒体文件**（只重传、不重下），所以网络抖动导致上传
+        失败时不用把整个文件再下一遍。
         """
         dests = [d for d in (dests or []) if d is not None]
         if not dests:
@@ -351,9 +548,45 @@ class ForwardBot:
                 log('该任务没有可用的目的频道，跳过消息 %s' % getattr(message, 'id', '?'),
                     tag=TAG_SKIP)
             return False
+        if not self._has_content(message):
+            # 无内容的消息不重试、不发送（否则会一直被服务器拒绝并堵死队列）
+            return 'empty'
+        limit = self.retry_limit if retry_limit is None else max(0, int(retry_limit))
         retries = 0
         sent_ids = set()
         last_error = None
+        locals_ = {}                # message id → (path, thumb_path)，重试免重下，退出前清理
+
+        async def _cleanup_locals():
+            for path, thumb in locals_.values():
+                for leftover in (path, thumb):
+                    if leftover:
+                        try:
+                            os.remove(leftover)
+                        except OSError:
+                            pass
+            locals_.clear()
+
+        async def _find_album():
+            """以本条为中心找回同一 grouped_id 的全部消息 id。
+
+            窗口从 ±12 起步；一旦命中的消息**贴在窗口边缘**，说明组内可能还有成员在窗外，
+            自动翻倍扩大（最多 ±256），避免大相册只转发到一半。
+            """
+            span = 12
+            while True:
+                msg_ids = []
+                hit_edge = False
+                async for msg in self.client.iter_messages(
+                        chat, min_id=message.id - span - 1,
+                        max_id=message.id + span + 1, limit=span * 2 + 2):
+                    if msg is not None and msg.grouped_id == message.grouped_id:
+                        msg_ids.append(msg.id)
+                        if msg.id <= message.id - span or msg.id >= message.id + span:
+                            hit_edge = True
+                if not hit_edge or span >= 256:
+                    return msg_ids
+                span *= 2
 
         async def _attempt():
             """投递一轮；返回 'direct' / 'download'（只要有一条走下载重传就算 download）。"""
@@ -365,65 +598,89 @@ class ForwardBot:
                 if message.grouped_id:
                     # 相册内各条消息的 id 是连续的：以本条为中心取一个小窗口即可整组找回，
                     # 与它在频道里的位置无关（因此历史里较早的相册也能整组转发）。
-                    span = 12
-                    msg_ids = []
-                    async for msg in self.client.iter_messages(
-                            chat, min_id=message.id - span - 1,
-                            max_id=message.id + span + 1, limit=span * 2 + 2):
-                        if msg is not None and msg.grouped_id == message.grouped_id:
-                            msg_ids.append(msg.id)
+                    msg_ids = await _find_album()
                     if message.id not in msg_ids:
                         msg_ids.append(message.id)
                     msg_ids.sort()
                     album = await self.client.get_messages(chat, ids=msg_ids)
-                    for m in album:
-                        if m is not None:
-                            kinds.add(await self._resend_single(m, dest))
+                    members = [m for m in album if m is not None]
+                    if not members:
+                        kinds.add('empty')
+                        sent_ids.add(self._dest_id(dest))
+                        continue
+                    # 整组发送（保留相册分组）：先试引用重发，被保护频道拒绝后
+                    # 下载全组、构造 SendMultiMedia 重新上传。
+                    try:
+                        await self._send_album_direct(dest, members)
+                        kinds.add('direct')
+                    except Exception as e:
+                        if not self._is_protected_error(e):
+                            raise
+                        logging.info('相册 %s 媒体引用重发受限，降级为下载后整组重传（%d 条）...',
+                                     message.grouped_id, len(members))
+                        await self._send_album_download(dest, members, keep=locals_)
+                        kinds.add('download')
+                    if on_sent is not None:
+                        on_sent([m.id for m in members], message.grouped_id)
                 else:
-                    kinds.add(await self._resend_single(message, dest))
+                    kind, _ = await self._resend_single(message, dest,
+                                                        local=locals_.get(message.id),
+                                                        keep=locals_)
+                    kinds.add(kind)
                 sent_ids.add(self._dest_id(dest))
+            if kinds and kinds <= {'empty'}:
+                return 'empty'
             return 'download' if 'download' in kinds else 'direct'
 
-        while True:
-            if not retry_forever and retries >= self.max_retries:
-                break
-            try:
-                if lock is not None:
-                    async with lock:
+        try:
+            while True:
+                if not retry_forever and retries >= self.max_retries:
+                    break
+                if retry_forever and limit and retries >= limit:
+                    if log:
+                        log('消息 %s 连续失败 %d 次，放弃并记入待补发（任务结束后会自动补发，'
+                            '也可手动恢复重试）' % (message.id, retries), tag=TAG_FAIL)
+                    logging.error('消息ID %s 连续失败 %d 次，放弃（待补发）。', message.id, retries)
+                    break
+                try:
+                    if lock is not None:
+                        async with lock:
+                            kind = await _attempt()
+                    else:
                         kind = await _attempt()
-                else:
-                    kind = await _attempt()
-                return kind
-            except Exception as e:
-                if self._is_protected_error(e):
-                    if log:
-                        log('消息 %s 受保护且降级重传失败，跳过：%s' % (message.id, e),
-                            tag=TAG_FAIL)
-                    return False
-                last_error = e
-                retries += 1
-                if retry_forever:
-                    delay = min(3 * retries, 60)
-                    # 无限重试时日志只记前 10 次、之后每 10 次记一条，避免刷屏
-                    if log and (retries <= 10 or retries % 10 == 0):
-                        log('消息 %s 转发失败（第 %d 次重试，%d 秒后再试）：%s'
-                            % (message.id, retries, delay, err_text(e)), tag=TAG_FAIL)
-                    logging.warning('转发消息ID %s 失败，第 %d 次重试（持续重试不放弃），%d 秒后再试，原因：%s',
-                                    message.id, retries, delay, e)
-                else:
-                    delay = 3
-                    if log:
-                        log('消息 %s 转发失败（第 %d 次重试）：%s'
-                            % (message.id, retries, err_text(e)), tag=TAG_FAIL)
-                    logging.error('转发消息ID %s 失败，第 %d 次重试，原因：%s', message.id, retries, e)
-                if gate is not None:
-                    await gate()
-                await asyncio.sleep(delay)
-        if log:
-            log('消息 %s 超过最大重试次数(%d)，放弃：%s' % (message.id, self.max_retries, last_error),
-                tag=TAG_FAIL)
-        logging.error('消息ID %s 转发失败，超过最大重试次数(%d)。', message.id, self.max_retries)
-        return False
+                    return kind
+                except Exception as e:
+                    if self._is_protected_error(e):
+                        if log:
+                            log('消息 %s 受保护且降级重传失败，跳过：%s' % (message.id, e),
+                                tag=TAG_FAIL)
+                        return False
+                    last_error = e
+                    retries += 1
+                    if retry_forever:
+                        delay = min(3 * retries, 60)
+                        # 无限重试时日志只记前 10 次、之后每 10 次记一条，避免刷屏
+                        if log and (retries <= 10 or retries % 10 == 0):
+                            log('消息 %s 转发失败（第 %d 次重试，%d 秒后再试）：%s'
+                                % (message.id, retries, delay, err_text(e)), tag=TAG_FAIL)
+                        logging.warning('转发消息ID %s 失败，第 %d 次重试（持续重试不放弃），%d 秒后再试，原因：%s',
+                                        message.id, retries, delay, e)
+                    else:
+                        delay = 3
+                        if log:
+                            log('消息 %s 转发失败（第 %d 次重试）：%s'
+                                % (message.id, retries, err_text(e)), tag=TAG_FAIL)
+                        logging.error('转发消息ID %s 失败，第 %d 次重试，原因：%s', message.id, retries, e)
+                    if gate is not None:
+                        await gate()
+                    await asyncio.sleep(delay)
+            if log:
+                log('消息 %s 超过最大重试次数(%d)，放弃：%s' % (message.id, self.max_retries, last_error),
+                    tag=TAG_FAIL)
+            logging.error('消息ID %s 转发失败，超过最大重试次数(%d)。', message.id, self.max_retries)
+            return False
+        finally:
+            await _cleanup_locals()
 
     # ---------------- 事件与补扫 ----------------
     async def _on_new_message(self, event):

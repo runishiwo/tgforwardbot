@@ -176,26 +176,32 @@ class WebServer:
             _ADMIN_CACHE['admin'] = (cache_key, html_bytes, etag)
         if request.headers.get('If-None-Match') == etag:
             return web.Response(status=304,
-                                headers={'ETag': etag, 'Cache-Control': 'public, max-age=60'})
+                                headers={'ETag': etag, 'Cache-Control': 'no-cache'})
         return web.Response(body=html_bytes, content_type='text/html',
-                            headers={'ETag': etag, 'Cache-Control': 'public, max-age=60'})
+                            headers={'ETag': etag, 'Cache-Control': 'no-cache'})
 
     async def handle_main(self, request):
         return await self._serve_admin(request)
 
     # ---------------- 静态 UI 资源 ----------------
     async def _serve_static(self, request, name):
+        """admin.css / admin.js。
+
+        用 `no-cache` 而不是 `max-age=N`：可以存，但每次使用前必须回源校验。
+        我们已经算好 ETag，所以未改动时只是一个 304 空响应，改了立刻全量下发 ——
+        既不浪费流量，也不会出现「改了样式但浏览器还拿着旧文件」。
+        （字体那边文件名带内容 hash，才适合强缓存，见 handle_static_font。）
+        """
         path = os.path.join(UI_DIR, name)
         loaded = _read_cached(path)
         if loaded is None:
             return web.Response(text='Not found', status=404)
         content, etag = loaded
+        headers = {'ETag': etag, 'Cache-Control': 'no-cache'}
         if request.headers.get('If-None-Match') == etag:
-            return web.Response(status=304,
-                                headers={'ETag': etag, 'Cache-Control': 'public, max-age=300'})
+            return web.Response(status=304, headers=headers)
         ctype = 'text/css' if name.endswith('.css') else 'application/javascript'
-        return web.Response(body=content, content_type=ctype,
-                            headers={'ETag': etag, 'Cache-Control': 'public, max-age=300'})
+        return web.Response(body=content, content_type=ctype, headers=headers)
 
     async def handle_static_css(self, request):
         return await self._serve_static(request, 'admin.css')
@@ -237,45 +243,63 @@ class WebServer:
                             content_type='text/html')
 
     def _tg_login_css(self):
+        """Telegram 登录页样式。与管理台共用「深靛夜空」配色（同一套令牌）。"""
         return """
-        :root{--bg:#0a0f1e;--panel:#141d33;--panel2:#1b2542;--border:#28324e;--border2:#37436a;
-          --text:#e8eefb;--muted:#8ea0bd;--faint:#61708f;--accent:#38bdf8;--accent2:#0ea5e9;--accent3:#6366f1}
+        :root{
+          --bg:oklch(.162 .034 277); --panel:oklch(.219 .030 278); --panel2:oklch(.263 .021 277);
+          --border:oklch(.288 .026 275); --border2:oklch(.368 .030 277);
+          --text:oklch(.955 .008 271); --muted:oklch(.749 .026 273); --faint:oklch(.603 .032 275);
+          --accent:oklch(.791 .134 220); --ok:oklch(.867 .134 165); --err:oklch(.704 .160 15);
+          --sunken:oklch(.144 .039 275); --glow-a:oklch(.599 .230 286);
+          --ease:cubic-bezier(.22,1,.36,1);
+        }
         *{box-sizing:border-box}
         html,body{height:100%}
         body{margin:0;display:flex;align-items:center;justify-content:center;
-          background:radial-gradient(1100px 620px at 50% -15%,#1a2748 0%,transparent 58%),
-            radial-gradient(800px 500px at 100% 110%,#16213f 0%,transparent 55%),var(--bg);
-          font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+          background:
+            radial-gradient(1000px 620px at 92% -10%,color-mix(in oklab,var(--ok) 11%,transparent),transparent 60%),
+            radial-gradient(880px 640px at 4% 108%,color-mix(in oklab,var(--glow-a) 20%,transparent),transparent 62%),
+            radial-gradient(760px 520px at 46% 46%,color-mix(in oklab,var(--accent) 6%,transparent),transparent 72%),
+            var(--bg);
+          background-attachment:fixed;
+          font-family:"MiSans-VF",-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
           color:var(--text);-webkit-font-smoothing:antialiased}
         .card{width:100%;max-width:400px;margin:16px;padding:40px 36px 30px;
-          background:linear-gradient(180deg,rgba(20,29,51,.96),rgba(16,23,42,.96));
-          border:1px solid var(--border);border-radius:20px;
-          box-shadow:0 30px 70px -25px rgba(0,0,0,.85);animation:rise .4s ease}
+          background:var(--panel);border:1px solid var(--border);border-radius:20px;
+          box-shadow:0 30px 70px -25px oklch(0 0 0 / .85), inset 0 1px 0 0 oklch(1 0 0 / .04);
+          animation:rise .42s var(--ease)}
         @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
         .logo{width:54px;height:54px;margin:0 auto 18px;border-radius:16px;
-          background:linear-gradient(135deg,var(--accent),var(--accent3));
-          display:flex;align-items:center;justify-content:center;
-          box-shadow:0 14px 30px -10px rgba(56,189,248,.7)}
+          background:var(--accent);color:var(--bg);
+          display:flex;align-items:center;justify-content:center}
         .logo svg{width:26px;height:26px}
-        h1{margin:0 0 6px;font-size:21px;text-align:center;letter-spacing:.3px}
+        h1{margin:0 0 6px;font-size:21px;text-align:center;letter-spacing:-.012em}
         .sub{margin:0 0 24px;text-align:center;color:var(--faint);font-size:13px}
         label{display:block;margin-bottom:7px;font-size:12.5px;color:var(--muted)}
-        input[type=text],input[type=tel],input[type=password]{width:100%;padding:12px 14px;font-size:15px;
-          background:#0b1224;color:var(--text);border:1px solid var(--border);border-radius:11px;outline:none;
-          transition:border-color .15s,box-shadow .15s;font-family:inherit;margin-bottom:16px}
-        input:focus{border-color:var(--accent2);box-shadow:0 0 0 3px rgba(14,165,233,.14)}
-        .btn{display:block;width:100%;padding:13px;font-size:15px;font-weight:700;letter-spacing:1px;
-          background:linear-gradient(135deg,var(--accent2),var(--accent3));color:#fff;border:none;
+        input[type=text],input[type=tel],input[type=password]{width:100%;padding:12px 14px;font-size:16px;
+          background:var(--sunken);color:var(--text);border:1px solid var(--border2);
+          border-radius:11px;outline:none;font-family:inherit;margin-bottom:16px;
+          transition:border-color .18s var(--ease),box-shadow .18s var(--ease)}
+        input:focus{border-color:var(--accent);
+          box-shadow:0 0 0 3px color-mix(in oklab,var(--accent) 16%,transparent)}
+        .btn{display:block;width:100%;padding:13px;font-size:15px;font-weight:600;letter-spacing:1px;
+          background:var(--accent);color:var(--bg);border:none;
           border-radius:11px;cursor:pointer;text-align:center;text-decoration:none;
-          transition:filter .15s,transform .05s;font-family:inherit}
-        .btn:hover{filter:brightness(1.12)} .btn:active{transform:translateY(1px)}
+          font-family:inherit;transition:background .18s var(--ease),transform .18s var(--ease)}
+        .btn:hover{background:color-mix(in oklab,var(--accent) 86%,white)}
+        .btn:active{transform:translateY(1px)}
         .btn.ghost{background:transparent;border:1px solid var(--border2);color:var(--muted);font-weight:600}
-        .err{padding:10px 13px;margin:0 0 16px;border-radius:10px;background:rgba(248,113,113,.12);
-          border:1px solid rgba(248,113,113,.42);color:#fca5a5;font-size:13px;text-align:center}
+        .btn.ghost:hover{background:var(--panel2);color:var(--text);border-color:var(--accent)}
+        .err{padding:10px 13px;margin:0 0 16px;border-radius:10px;
+          background:color-mix(in oklab,var(--err) 14%,transparent);
+          border:1px solid color-mix(in oklab,var(--err) 42%,transparent);
+          color:color-mix(in oklab,var(--err) 55%,white);font-size:13px;text-align:center}
         .ok{margin:0 0 18px;padding:12px 14px;border-radius:11px;text-align:center;
-          background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.45);color:#6ee7b7;font-size:14px}
+          background:color-mix(in oklab,var(--ok) 14%,transparent);
+          border:1px solid color-mix(in oklab,var(--ok) 42%,transparent);
+          color:var(--ok);font-size:14px}
         .tip{color:var(--muted);font-size:13.5px;line-height:1.7;margin:0 0 18px}
-        .tip code{background:#0b1224;padding:2px 6px;border-radius:6px;color:var(--accent);font-size:12.5px}
+        .tip code{background:var(--sunken);padding:2px 6px;border-radius:6px;color:var(--accent);font-size:12.5px}
         .tip b{color:var(--text)}
         .foot{display:block;text-align:center;margin-top:20px;color:var(--faint);font-size:12px;text-decoration:none}
         .foot:hover{color:var(--accent)}
@@ -326,7 +350,7 @@ class WebServer:
                 '<meta name="viewport" content="width=device-width,initial-scale=1">'
                 '<title>连接 Telegram 账号 · ForwardBot</title><style>' + self._tg_login_css() +
                 '</style></head><body><div class="card">'
-                '<div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" '
+                '<div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
                 'stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/>'
                 '<path d="M22 2 15 22l-4-9-9-4Z"/></svg></div>'
                 '<h1>连接 Telegram 账号</h1>'

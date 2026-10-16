@@ -24,28 +24,161 @@ let detailLines = [];
 let logFilter = '';        // 日志类别筛选：'' = 全部；其余为 直转/下载转/屏蔽/未命中/失败
 let detailLogDate = '';    // 当前查看的日志日期 YYYY-MM-DD，'' = 今天
 let detailLogDates = [];   // 该任务已有的日志日期列表（新 → 旧）
+let logLimit = 300;        // 日志一次最多渲染多少行（渲染「最近 N 行」，更早的按需加载）
 let dialogsAll = [];
 let dialogsPostable = [];
 
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])); }
+
+/* ---------- 顶部加载进度条：只在请求超过 120ms 时才显示，避免轮询时一直闪 ---------- */
+let _busyN = 0, _busyT = null;
+function busy(delta) {
+  _busyN = Math.max(0, _busyN + delta);
+  const bar = $('pgbar');
+  if (!bar) return;
+  if (_busyN > 0) {
+    if (_busyT == null) _busyT = setTimeout(() => bar.classList.add('on'), 120);
+  } else {
+    if (_busyT != null) { clearTimeout(_busyT); _busyT = null; }
+    bar.classList.remove('on');
+  }
+}
+
+/* ---------- Toast：错误类不自动消失，必须手动关（点 × 或被新的挤掉） ---------- */
+const MAX_TOASTS = 5;
 function toast(msg, kind) {
+  const box = $('toasts');
+  if (!box) return;
+  while (box.children.length >= MAX_TOASTS) box.removeChild(box.firstChild);
   const d = document.createElement('div');
   d.className = 'toast ' + (kind || '');
-  d.textContent = msg;
-  $('toasts').appendChild(d);
-  setTimeout(() => d.remove(), 3600);
+  const t = document.createElement('div');
+  t.className = 'tt';
+  t.textContent = msg;
+  const x = document.createElement('button');
+  x.className = 'tx'; x.type = 'button'; x.title = '关闭'; x.setAttribute('aria-label', '关闭');
+  x.textContent = '×';
+  x.onclick = () => d.remove();
+  d.appendChild(t); d.appendChild(x);
+  box.appendChild(d);
+  if (kind !== 'err') setTimeout(() => { if (d.parentNode) d.remove(); }, 3600);
+  return d;
 }
+
 async function api(path, opts) {
-  const r = await fetch(path, opts);
-  let data = null;
-  try { data = await r.json(); } catch (e) { data = {}; }
-  if (!r.ok) throw new Error((data && (data.error || data.message)) || ('HTTP ' + r.status));
-  return data;
+  busy(1);
+  try {
+    const r = await fetch(path, opts);
+    let data = null;
+    try { data = await r.json(); } catch (e) { data = {}; }
+    if (!r.ok) throw new Error((data && (data.error || data.message)) || ('HTTP ' + r.status));
+    return data;
+  } finally { busy(-1); }
 }
+
+/* ================= 自定义确认框（替代原生 confirm） =================
+   用法： if (!await confirmBox({...})) return;
+   opt: title / html / okText / cancelText / danger / type:'input' + typeWord
+=================================================================== */
+let _cfResolve = null;
+function cfClose(v) {
+  const m = $('confirm-mask');
+  if (m) m.classList.remove('on');
+  const r = _cfResolve; _cfResolve = null;
+  if (r) r(v);
+}
+const CF_WARN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>';
+function confirmBox(opt) {
+  opt = opt || {};
+  const m = $('confirm-mask');
+  if (!m) { return Promise.resolve(window.confirm(opt.text || opt.html || '')); }
+  $('cf-title').textContent = opt.title || '请确认';
+  const body = $('cf-body');
+  if (opt.html != null) body.innerHTML = opt.html;
+  else body.textContent = opt.text || '';
+  $('cf-ico').innerHTML = CF_WARN_SVG;
+  const ok = $('cf-ok');
+  ok.textContent = opt.okText || '确定';
+  ok.className = 'btn ' + (opt.danger === false ? '' : 'danger');
+  const cancel = $('cf-cancel');
+  cancel.textContent = opt.cancelText || '取消';
+
+  // 高危操作：要求手动输入一段确认词才允许点确定
+  const needType = opt.type === 'input' && !!opt.typeWord;
+  const tw = $('cf-type');
+  tw.style.display = needType ? '' : 'none';
+  const word = String(opt.typeWord || '');
+  $('cf-typehint').innerHTML = needType
+    ? ('这一步<b style="color:var(--err)">不可恢复</b>。请输入 <b>' + esc(word) + '</b> 以确认：')
+    : '';
+  const inp = $('cf-input');
+  inp.value = '';
+  inp.placeholder = needType ? word : '';
+  const sync = () => { ok.disabled = needType && inp.value.trim() !== word; };
+  sync();
+  inp.oninput = sync;
+  inp.onkeydown = e => {
+    if (e.key === 'Enter' && !ok.disabled) { e.preventDefault(); cfClose(true); }
+  };
+  ok.onclick = () => { if (!ok.disabled) cfClose(true); };
+  m.classList.add('on');
+  setTimeout(() => { try { (needType ? inp : ok).focus(); } catch (e) {} }, 40);
+  return new Promise(res => { _cfResolve = res; });
+}
+document.addEventListener('keydown', e => {
+  const m = $('confirm-mask');
+  if (!m || !m.classList.contains('on')) return;
+  if (e.key === 'Escape') { e.preventDefault(); cfClose(false); }
+});
+document.addEventListener('click', e => {
+  const m = $('confirm-mask');
+  if (!m || !m.classList.contains('on')) return;
+  if (e.target === m) cfClose(false);      // 点遮罩空白处 = 取消
+});
 function fmtUptime(sec) {
   sec = sec || 0;
   const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
   return (d ? d + '天' : '') + (h || d ? h + '小时' : '') + m + '分';
+}
+
+/* ================= 表单校验（字段级，标红 + 定位到第一处） ================= */
+function clearErrs() {
+  document.querySelectorAll('.ferr').forEach(e => e.remove());
+  document.querySelectorAll('.bad').forEach(e => e.classList.remove('bad'));
+}
+function markErr(el, msg) {
+  if (!el) return null;
+  el.classList.add('bad');
+  const host = (el.closest && el.closest('.field')) || el.parentNode;
+  let n = host && host.querySelector ? host.querySelector('.ferr') : null;
+  if (!n && host && host.appendChild) { n = document.createElement('div'); n.className = 'ferr'; host.appendChild(n); }
+  if (n) n.textContent = msg;
+  return el;
+}
+function checkNum(id, min, max, label) {
+  const el = $(id);
+  if (!el) return null;
+  const v = parseInt(el.value, 10);
+  if (isNaN(v) || v < min || v > max) return markErr(el, label + '需要在 ' + min + ' ~ ' + max + ' 之间');
+  return null;
+}
+function checkRange(startId, endId) {
+  const s = $(startId), e = $(endId);
+  if (!s || !e) return null;
+  const sv = s.value || '', ev = e.value || '';
+  if (!sv || !ev || sv < ev) return null;   // 'YYYY-MM-DDTHH:mm' 可以直接按字符串比大小
+  const box = document.querySelector('[data-dt="' + endId + '"]') || e;
+  return markErr(box, '结束时间必须晚于起始时间');
+}
+function focusFirst(bad) {
+  const first = (bad || []).filter(Boolean)[0];
+  if (!first) return;
+  try { first.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
+  try { first.focus({ preventScroll: true }); } catch (e) {}
+}
+function reportBad(bad) {
+  toast('请先修正表单里标红的 ' + bad.length + ' 处问题', 'err');
+  focusFirst(bad);
 }
 
 /* ================= 视图切换 ================= */
@@ -78,6 +211,16 @@ function showView(name, group) {
 }
 function switchView(name) { showView(name, CURRENT_GROUP); }
 function enterCategory(g) { showView(g === 'manual' ? 'manual' : 'monitor', g); }
+/* 卡片底部的子入口 chip：各自跳自己的视图，必须 stopPropagation，否则会冒泡到整卡的 enterCategory */
+document.querySelectorAll('.cat-card .cb button').forEach(btn => {
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    const g = btn.closest('.cat-card').dataset.group;
+    const to = btn.dataset.go;
+    if (to === 'tasks') { showView('tasks', g); setTaskKind(null, g); return; }
+    showView(to, g);              // words 页会按 CURRENT_GROUP 自动切到对应 scope
+  });
+});
 function renderHeadActions(name) {
   const box = $('head-actions');
   box.innerHTML = '';
@@ -90,28 +233,73 @@ function renderHeadActions(name) {
 document.querySelectorAll('#nav button').forEach(b => b.addEventListener('click', () => {
   const g = b.closest('.nav-group');
   showView(b.dataset.view, g ? g.dataset.group : 'monitor');
+  toggleNav(false);                 // 移动端选完就收起抽屉
 }));
 
+/* ================= 移动端抽屉导航 ================= */
+const NAV_MQ = window.matchMedia('(max-width:1024px)');
+function navIsOpen() {
+  const app = document.querySelector('.app');
+  return !!app && app.classList.contains('nav-open');
+}
+function toggleNav(open) {
+  const app = document.querySelector('.app');
+  if (!app) return;
+  let on = (open === undefined || open === null) ? !app.classList.contains('nav-open') : !!open;
+  if (on && !NAV_MQ.matches) on = false;   // 桌面端没有抽屉，别误锁 body 滚动
+  app.classList.toggle('nav-open', on);
+  document.body.classList.toggle('nav-locked', on);
+  const t = $('nav-toggle');
+  if (t) t.setAttribute('aria-expanded', on ? 'true' : 'false');
+}
+(function bindNavDrawer() {
+  const t = $('nav-toggle'); if (t) t.onclick = () => toggleNav();
+  const c = $('nav-close'); if (c) c.onclick = () => toggleNav(false);
+  const m = $('nav-mask'); if (m) m.onclick = () => toggleNav(false);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && navIsOpen()) toggleNav(false);
+  });
+  // 从窄屏拖宽到桌面时强制收起，避免残留 body 锁滚动
+  const onChange = () => { if (!NAV_MQ.matches) toggleNav(false); };
+  if (NAV_MQ.addEventListener) NAV_MQ.addEventListener('change', onChange);
+  else if (NAV_MQ.addListener) NAV_MQ.addListener(onChange);
+})();
+
 /* ================= 概览 ================= */
+/* 统计卡右上角的水印图标 */
+const STAT_ICONS = {
+  ok: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.2 2.4 2.4 4.6-5"/></svg>',
+  err: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/></svg>',
+  skip: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12h7"/></svg>',
+  match: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>',
+  queue: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>',
+  run: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg>',
+  time: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/></svg>',
+  task: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>',
+};
+function statCards(list) {
+  return list.map(x =>
+    `<div class="stat ${x[2]}"><div class="k">${x[0]}</div><div class="v"${x[4] === 'time' ? ' style="font-size:18px"' : ''}>${x[1]}</div>`
+    + `<div class="t">${esc(x[3])}</div><span class="si">${STAT_ICONS[x[4]] || STAT_ICONS.task}</span></div>`).join('');
+}
 async function loadStats() {
   try {
     const d = await api('/api/stats');
     const t = d.today || {};
     const c = d.counts || {};
     setConn(d.connection, d.telegram_authorized);
-    $('cat-monitor-cnt').textContent = '实时任务 ' + (c.monitor || 0) + ' 条 · 运行中 ' + (c.monitor_running || 0) + ' 条';
-    $('cat-manual-cnt').textContent = '手动任务 ' + (c.manual || 0) + ' 条 · 运行中 ' + (c.manual_running || 0) + ' 条';
+    $('cat-monitor-cnt').innerHTML = '实时任务 <b>' + (c.monitor || 0) + '</b> 条 · 运行中 <b class="on">' + (c.monitor_running || 0) + '</b> 条';
+    $('cat-manual-cnt').innerHTML = '手动任务 <b>' + (c.manual || 0) + '</b> 条 · 运行中 <b class="on">' + (c.manual_running || 0) + '</b> 条';
     const cards = [
-      ['转发成功', t.forwarded || 0, 'ok', '今日累计 ' + ((d.totals || {}).forwarded || 0)],
-      ['转发失败', t.failed || 0, 'err', '今日累计 ' + ((d.totals || {}).failed || 0)],
-      ['跳过', t.skipped || 0, 'skip', '命中屏蔽词 / 重复'],
-      ['命中关键词', t.matched || 0, '', '进入转发判断'],
-      ['队列', d.queue || 0, 'warn', '待转发消息'],
-      ['运行中任务', c.tasks_running || 0, 'ok', '实时 ' + (c.monitor_running || 0) + ' · 手动 ' + (c.manual_running || 0)],
+      ['转发成功', t.forwarded || 0, 'ok', '今日累计 ' + ((d.totals || {}).forwarded || 0), 'ok'],
+      ['转发失败', t.failed || 0, 'err', '今日累计 ' + ((d.totals || {}).failed || 0), 'err'],
+      ['跳过', t.skipped || 0, 'skip', '命中屏蔽词 / 重复', 'skip'],
+      ['命中关键词', t.matched || 0, '', '进入转发判断', 'match'],
+      ['队列', d.queue || 0, 'warn', '待转发消息', 'queue'],
+      ['运行中任务', c.tasks_running || 0, 'ok', '实时 ' + (c.monitor_running || 0) + ' · 手动 ' + (c.manual_running || 0), 'run'],
+      ['连续运行', fmtUptime(d.uptime_seconds), '', '自 ' + (d.started_at || ''), 'time'],
     ];
-    $('stat-cards').innerHTML = cards.map(x =>
-      `<div class="stat ${x[2]}"><div class="k">${x[0]}</div><div class="v">${x[1]}</div><div class="t">${esc(x[3])}</div></div>`).join('')
-      + `<div class="stat"><div class="k">连续运行</div><div class="v" style="font-size:18px">${fmtUptime(d.uptime_seconds)}</div><div class="t">自 ${esc(d.started_at || '')}</div></div>`;
+    $('stat-cards').innerHTML = statCards(cards);
     renderChart('chart', d.days || []);
     const list = (d.recent_tasks || []).filter(x => x.state === 'running'); 
     $('run-count').textContent = list.length ? ('共 ' + list.length + ' 条') : '';
@@ -120,30 +308,118 @@ async function loadStats() {
     bindTaskActions($('dash-tasks'), list);
   } catch (e) { $('stat-cards').innerHTML = '<div class="empty">概览加载失败：' + esc(e.message) + '</div>'; }
 }
+/* 取一个「好看」的坐标轴上限：1/2/5 × 10^n 的半档向上取整 */
+function niceTop(v) {
+  if (!(v > 0)) return 5;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  const half = p / 2;
+  return Math.max(half, Math.ceil(v / half) * half);
+}
+function fmtAxis(v) {
+  if (v >= 10000) return Math.round(v / 1000) + 'k';
+  if (v >= 1000) return (Math.round(v / 100) / 10) + 'k';
+  return String(Math.round(v * 10) / 10);
+}
+let _chartSeq = 0;
+/* 转发成功 = 柱状（每日一个独立量），转发失败 = 折线叠在柱子上；
+   比两条几乎贴地的折线更能读出「量」的差异。 */
 function renderChart(target, days) {
   const el = (typeof target === 'string' && $(target)) ? $(target) : $('chart');
+  if (!el) return;
   days = days || [];
-  if (!days.length) { el.innerHTML = '<div class="empty">暂无数据</div>'; return; }
-  const W = 720, H = 190, PL = 34, PR = 12, PT = 14, PB = 26;
-  const iw = W - PL - PR, ih = H - PT - PB;
-  const rawMax = Math.max(1, ...days.map(d => Math.max(d.forwarded || 0, d.failed || 0)));
-  const top = rawMax <= 5 ? 5 : rawMax <= 10 ? 10 : rawMax <= 20 ? 20 : rawMax <= 50 ? 50 : rawMax <= 100 ? 100 : Math.ceil(rawMax / 100) * 100;
-  const X = i => (days.length === 1 ? PL + iw / 2 : PL + iw * i / (days.length - 1));
-  const Y = v => PT + ih - ih * v / top;
-  const line = key => days.map((d, i) => `${X(i).toFixed(1)},${Y(d[key] || 0).toFixed(1)}`).join(' ');
-  const grid = [0, top / 2, top].map(v =>
-    `<line x1="${PL}" y1="${Y(v)}" x2="${W - PR}" y2="${Y(v)}" class="gl"/><text x="${PL - 6}" y="${Y(v) + 3.5}" class="gt" text-anchor="end">${top >= 100 ? Math.round(v) : v}</text>`
-  ).join('');
-  const dots = days.map((d, i) => {
-    const lbl = esc(d.label || d.date || '');
-    return `<circle cx="${X(i).toFixed(1)}" cy="${Y(d.forwarded || 0).toFixed(1)}" r="3.2" class="dot ok"><title>${lbl} 转发成功 ${d.forwarded || 0}</title></circle>` +
-      `<circle cx="${X(i).toFixed(1)}" cy="${Y(d.failed || 0).toFixed(1)}" r="3.2" class="dot err"><title>${lbl} 转发失败 ${d.failed || 0}</title></circle>`;
+  const tip = $('chart-tip');
+  const maxV = Math.max(0, ...days.map(d => Math.max(d.forwarded || 0, d.failed || 0)));
+  if (!days.length || maxV <= 0) {
+    el.innerHTML = '<div class="empty">' + (days.length ? '近 7 天还没有转发记录' : '暂无数据') + '</div>';
+    el.onmouseleave = null;
+    if (tip) tip.style.display = 'none';
+    return;
+  }
+  const W = 720, H = 236, PL = 44, PR = 16, PT = 22, PB = 30;
+  const iw = W - PL - PR, ih = H - PT - PB, baseY = PT + ih;
+  const top = niceTop(maxV);
+  const Y = v => baseY - ih * v / top;
+  const slot = iw / days.length;
+  const bw = Math.max(6, Math.min(48, slot * 0.5));
+  const cx = i => PL + slot * (i + 0.5);
+
+  // 网格：0 / 25% / 50% / 75% / 100%，基线实线更实，其余虚线更淡；只标 50% 与 100%
+  const grid = [0, .25, .5, .75, 1].map(f => {
+    const v = top * f, y = Y(v);
+    return `<line class="gl${f ? '' : ' base'}" x1="${PL}" y1="${y.toFixed(1)}" x2="${W - PR}" y2="${y.toFixed(1)}"/>`
+      + (f === 0 || f === .5 || f === 1
+        ? `<text class="gt" x="${PL - 9}" y="${(y + 4).toFixed(1)}" text-anchor="end">${fmtAxis(v)}</text>` : '');
   }).join('');
-  const xl = days.map((d, i) =>
-    `<text x="${X(i).toFixed(1)}" y="${H - 8}" class="gt" text-anchor="middle">${esc(d.label || d.date || '')}</text>`).join('');
-  el.innerHTML = `<svg class="lchart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${grid}` +
-    `<polyline class="ln ok" points="${line('forwarded')}"/><polyline class="ln err" points="${line('failed')}"/>` +
-    `${dots}${xl}</svg>`;
+
+  // 柱：转发成功，柱顶直接标数值（最高的那根高亮），省掉额外的「峰值」标注
+  let pi = 0;
+  days.forEach((d, i) => { if ((d.forwarded || 0) > (days[pi].forwarded || 0)) pi = i; });
+  const gid = 'cag' + (++_chartSeq);
+  const bars = days.map((d, i) => {
+    const v = d.forwarded || 0;
+    const h = v > 0 ? Math.max(2.5, ih * v / top) : 0;
+    const y = baseY - h;
+    const x = (cx(i) - bw / 2).toFixed(1);
+    return `<rect class="bar" x="${x}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="4" fill="url(#${gid})"/>` +
+      (v > 0 ? `<text class="bv${i === pi ? ' max' : ''}" x="${cx(i).toFixed(1)}" y="${(y - 8).toFixed(1)}">${v}</text>` : '');
+  }).join('');
+
+  // 折线：转发失败（画在柱子之上，柱子高时也能看见）
+  const errLine = days.map((d, i) => `${cx(i).toFixed(1)},${Y(d.failed || 0).toFixed(1)}`).join(' ');
+  const errDots = days.map((d, i) =>
+    `<circle class="dot err" cx="${cx(i).toFixed(1)}" cy="${Y(d.failed || 0).toFixed(1)}" r="3.2"/>`).join('');
+
+  const xl = days.map((d, i) => {
+    const last = i === days.length - 1;
+    return `<text class="gt${last ? ' now' : ''}" x="${cx(i).toFixed(1)}" y="${H - 9}" text-anchor="middle">${esc(d.label || d.date || '')}</text>`;
+  }).join('');
+
+  el.innerHTML = `<svg class="lchart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">` +
+    `<defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">` +
+    `<stop offset="0%" stop-color="#72efbd" stop-opacity=".95"/>` +
+    `<stop offset="100%" stop-color="#72efbd" stop-opacity=".55"/></linearGradient></defs>` +
+    `${grid}` +
+    `<rect class="hband" x="0" y="${PT}" width="0" height="${ih}"/>` +
+    `${bars}` +
+    `<polyline class="ln err" points="${errLine}"/>${errDots}${xl}` +
+    `<line class="gline" x1="0" y1="${PT}" x2="0" y2="${baseY}"/>` +
+    days.map((d, i) => `<rect class="hit" x="${(PL + slot * i).toFixed(1)}" y="${PT}" width="${slot.toFixed(1)}" height="${ih}" data-i="${i}"/>`).join('') +
+    `</svg>`;
+
+  const gl = el.querySelector('.gline');
+  const hb = el.querySelector('.hband');
+  const barEls = el.querySelectorAll('.bar');
+  const hide = () => {
+    if (tip) { tip.style.display = 'none'; tip.dataset.on = ''; }
+    if (gl) gl.classList.remove('on');
+    if (hb) hb.classList.remove('on');
+    barEls.forEach(b => { b.style.opacity = ''; });
+  };
+  if (!tip) { el.onmouseleave = null; return; }
+  const show = (ev, i) => {
+    const d = days[i] || {};
+    const ok = d.forwarded || 0, er = d.failed || 0;
+    tip.innerHTML = '<div class="cd">' + esc(d.label || d.date || '') + '</div>' +
+      '<div class="cr"><span><i class="a"></i>转发成功</span><b>' + ok + '</b></div>' +
+      '<div class="cr"><span><i class="b"></i>转发失败</span><b>' + er + '</b></div>' +
+      '<div class="cr sum"><span>合计</span><b>' + (ok + er) + '</b></div>';
+    tip.style.display = 'block';
+    const w = tip.offsetWidth || 180, h = tip.offsetHeight || 80;
+    let L = ev.clientX + 14, T = ev.clientY - h - 10;
+    if (L + w > window.innerWidth - 8) L = ev.clientX - w - 14;
+    if (T < 8) T = ev.clientY + 16;
+    tip.style.left = Math.max(8, L) + 'px';
+    tip.style.top = Math.max(8, Math.min(T, window.innerHeight - h - 8)) + 'px';
+    tip.dataset.on = '1';
+    if (gl) { gl.setAttribute('x1', cx(i)); gl.setAttribute('x2', cx(i)); gl.classList.add('on'); }
+    if (hb) { hb.setAttribute('x', (PL + slot * i).toFixed(1)); hb.setAttribute('width', slot.toFixed(1)); hb.classList.add('on'); }
+    barEls.forEach((b, j) => { b.style.opacity = (j === i ? '1' : '.45'); });
+  };
+  el.querySelectorAll('.hit').forEach(r => {
+    r.addEventListener('mousemove', ev => show(ev, +r.dataset.i));
+    r.addEventListener('mouseleave', hide);
+  });
+  el.onmouseleave = hide;   // 用赋值而非 addEventListener：图表每 8 秒重绘，避免监听器堆积
 }
 async function renderOverview(kind) {
   const pre = kind === 'monitor' ? 'ov-mon' : 'ov-man';
@@ -159,14 +435,14 @@ async function renderOverview(kind) {
     // 所以任务「重新开始」（统计清零）或删除任务后，这里的数字会同步减少 —— 不再是一个只增不减的独立计数器。
     const agg = { checked: 0, matched: 0, sent: 0, failed: 0, skipped: 0, queued: 0 };
     tasks.forEach(t => { const s = t.stats || {}; Object.keys(agg).forEach(k => { agg[k] += (s[k] || 0); }); });
-    $('' + pre + '-stat').innerHTML = [
-      ['转发成功', agg.sent, 'ok', '全部任务合计'],
-      ['转发失败', agg.failed, 'err', '全部任务合计'],
-      ['跳过', agg.skipped, 'skip', '屏蔽词 / 重复 / 来源即目标'],
-      ['命中关键词', agg.matched, '', '全部任务合计'],
-      ['运行中任务', counts.running || 0, 'ok', '已停用 ' + (counts.paused || 0)],
-    ].map(x => `<div class="stat ${x[2]}"><div class="k">${x[0]}</div><div class="v">${x[1]}</div><div class="t">${esc(x[3])}</div></div>`).join('')
-      + `<div class="stat"><div class="k">${label}任务总数</div><div class="v" style="font-size:18px">${counts.total || 0}</div><div class="t">运行中 ${counts.running || 0} · 已停用 ${counts.paused || 0}</div></div>`;
+    $('' + pre + '-stat').innerHTML = statCards([
+      ['转发成功', agg.sent, 'ok', '全部任务合计', 'ok'],
+      ['转发失败', agg.failed, 'err', '全部任务合计', 'err'],
+      ['跳过', agg.skipped, 'skip', '屏蔽词 / 重复 / 来源即目标', 'skip'],
+      ['命中关键词', agg.matched, '', '全部任务合计', 'match'],
+      ['运行中任务', counts.running || 0, 'ok', '已停用 ' + (counts.paused || 0), 'run'],
+      [label + '任务总数', counts.total || 0, '', '运行中 ' + (counts.running || 0) + ' · 已停用 ' + (counts.paused || 0), 'time'],
+    ]);
     renderChart(pre + '-chart', days);
     const states = ['running', 'paused', 'done', 'cancelled', 'failed', 'interrupted'];
     $('' + pre + '-states').innerHTML = states.map(s =>
@@ -216,16 +492,29 @@ async function loadTasks() {
     if (document.getElementById('view-dashboard-manual').classList.contains('active')) renderOverview('manual');
   } catch (e) { $('task-list').innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>'; }
 }
-function renderTasks() {
+/* 任务多的时候只先渲染一页，其余点「加载更多」再追加，避免上百条一次性重排卡顿 */
+const TASK_PAGE = 30;
+let taskPage = 0;
+function renderTasks(keepPage) {
+  if (!keepPage) taskPage = 0;
   const q = ($('task-q').value || '').trim().toLowerCase();
   let items = tasksCache;
   if (taskKind) items = items.filter(x => x.kind === taskKind);
   if (taskState) items = items.filter(x => x.state === taskState);
   if (q) items = items.filter(x => x.name.toLowerCase().includes(q) || x.id.toLowerCase().includes(q));
   $('tasks-count').textContent = '显示 ' + items.length + ' / ' + tasksCache.length + ' 条';
-  $('task-list').innerHTML = items.length ? items.map(taskCard).join('') : '<div class="empty">没有符合条件的任务</div>';
+  const cap = (taskPage + 1) * TASK_PAGE;
+  const shown = items.slice(0, cap);
+  const rest = items.length - shown.length;
+  let html = shown.length ? shown.map(taskCard).join('') : '<div class="empty">没有符合条件的任务</div>';
+  if (rest > 0) {
+    html += '<div class="loadmore"><button class="btn ghost sm" onclick="loadMoreTasks()">加载更多（还有 '
+      + rest + ' 条）</button></div>';
+  }
+  $('task-list').innerHTML = html;
   bindTaskActions($('task-list'), items);
 }
+function loadMoreTasks() { taskPage += 1; renderTasks(true); }
 function taskCard(t) {
   const s = t.stats || {};
   return `<div class="tk" data-id="${esc(t.id)}">
@@ -244,9 +533,27 @@ function taskCard(t) {
         <div>跳过<b>${s.skipped || 0}</b></div>
         ${t.kind === 'manual' ? `<div>待转发<b>${s.queued || 0}</b></div>` : ''}
       </div>
+      ${taskProgress(t)}
     </div>
     <div class="acts" data-acts="${esc(t.id)}"></div>
   </div>`;
+}
+/* 手动转发任务的进度条：已处理 / (已处理 + 待转发) */
+function taskProgress(t) {
+  if (t.kind !== 'manual') return '';
+  const s = t.stats || {};
+  const done = (s.sent || 0) + (s.failed || 0) + (s.skipped || 0);
+  const total = done + (s.queued || 0);
+  if (total <= 0) return '';
+  const pct = Math.min(100, Math.round(done * 100 / total));
+  const phase = t.phase === 'scanning' ? '扫描中' : (t.phase === 'forwarding' ? '转发中' : '');
+  const tip = phase === 'scanning'
+    ? '扫描阶段：已扫到的消息正在入队，待转发数还会增长'
+    : ('已处理 ' + done + ' / ' + total + ' 条');
+  return `<div class="pbar${(s.failed || 0) ? ' has-err' : ''}" title="${esc(tip)}">
+      <div class="track"><i style="width:${pct}%"></i></div>
+      <span class="ptxt">${phase ? esc(phase) + ' · ' : ''}${done} / ${total}（${pct}%）</span>
+    </div>`;
 }
 function bindTaskActions(root, items) {
   const pool = items || tasksCache;
@@ -288,7 +595,13 @@ async function manualState(id, action) {
   } catch (e) { toast('操作失败：' + e.message, 'err'); }
 }
 async function restartManual(id, name) {
-  if (!confirm('「重新开始」会清空该任务的统计与转发记录，时间范围内命中的消息会从头重新转发一遍（之前已转过的也会再发一次，可能重复）。确定对「' + (name || id) + '」重新开始？')) return;
+  const ok = await confirmBox({
+    title: '重新开始任务',
+    html: '将对 <b>' + esc(name || id) + '</b> 重新开始：清空该任务的统计与转发记录，时间范围内命中的消息<b>从头重新转发一遍</b>。'
+      + '<div class="warnline">⚠ 之前已经转过的消息会再发一次，目的频道会出现重复内容。</div>',
+    okText: '重新开始',
+  });
+  if (!ok) return;
   try {
     await api('/api/tasks/manual/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, action: 'restart' }) });
     toast('任务已重新开始', 'ok');
@@ -462,6 +775,20 @@ document.addEventListener('click', function (e) {
   closePicker();
 });
 async function saveEdit(id) {
+  clearErrs();
+  const bad = [];
+  const nameEl = $('ed-name');
+  if (nameEl && (nameEl.value || '').trim().length > 80) bad.push(markErr(nameEl, '任务名称请不要超过 80 个字'));
+  if (!channelSelToArr('ed-targets').length) bad.push(markErr($('ed-targets'), '请至少选择一个目的频道'));
+  const eb = checkNum('ed-keep', 0, 3650, '日志保留天数');
+  if (eb) bad.push(eb);
+  if (editKind !== 'monitor') {
+    const e2 = checkNum('ed-limit', 1, 10000, '扫描上限');
+    if (e2) bad.push(e2);
+    const e3 = checkRange('ed-start', 'ed-end');
+    if (e3) bad.push(e3);
+  }
+  if (bad.length) { reportBad(bad); return; }
   const getSel = sid => channelSelToArr(sid);
   const base = {
     name: $('ed-name').value.trim(),
@@ -497,7 +824,14 @@ async function saveEdit(id) {
   finally { btn.disabled = false; }
 }
 async function dropTask(id, name) {
-  if (!confirm('确定删除任务「' + name + '」？该任务的日志与记录会一并删除。')) return;
+  const ok = await confirmBox({
+    title: '删除任务',
+    html: '确定删除任务 <b>' + esc(name || id) + '</b>？'
+      + '<div class="warnline">该任务的日志、统计与转发锚点会一并删除，无法恢复。</div>',
+    okText: '删除任务',
+    type: 'input', typeWord: 'DELETE',
+  });
+  if (!ok) return;
   try { await api('/api/tasks/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); toast('已删除', 'ok'); loadTasks(); if (detailId === id) showView('tasks'); }
   catch (e) { toast('删除失败：' + e.message, 'err'); }
 }
@@ -509,6 +843,7 @@ async function openTask(id) {
   logFilter = '';                    // 换任务时回到「全部」
   detailLogDate = '';                // 换任务时回到「今天」
   detailLogDates = [];
+  logLimit = 300;                    // 换任务时回到只渲染最近 300 行
   setDetailMode('view');
   showView('taskdetail');
   await loadTaskDetail(true);
@@ -573,7 +908,12 @@ async function loadTaskDetail(scroll) {
     const aacts = $('dt-anchor-acts'); aacts.innerHTML = '';
     const mka = (text, cls, fn) => { const b = document.createElement('button'); b.className = 'btn ' + cls + ' sm'; b.textContent = text; b.onclick = fn; return b; };
     aacts.appendChild(mka('重置该任务锚点（强制重发）', 'warn', async () => {
-      if (!confirm('重置后该任务之前转发过的消息都会当作「未转发」重新处理，确定？')) return;
+      if (!await confirmBox({
+        title: '重置转发锚点',
+        html: '重置后，该任务<b>之前转发过的消息都会当作「未转发」</b>重新处理并再次转发。'
+          + '<div class="warnline">⚠ 目的频道会出现重复内容。</div>',
+        okText: '重置锚点',
+      })) return;
       try { await api('/api/anchors/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: 'task', id: t.id }) }); toast('已重置锚点', 'ok'); loadTaskDetail(); }
       catch (e) { toast('重置失败：' + e.message, 'err'); }
     }));
@@ -605,6 +945,7 @@ function parseLogLine(l) {
   return { time: m[1] || '', tag: tag, text: m[3] || '' };
 }
 function setLogFilter(tag) { logFilter = tag || ''; renderDetailLog(); }
+function logShowMore() { logLimit += 500; renderDetailLog(); }
 function renderDetailLog() {
   const q = ($('dt-q').value || '').trim();
   const rows = detailLines.map(parseLogLine);
@@ -626,10 +967,19 @@ function renderDetailLog() {
     ? ('匹配 ' + shown.length + ' / ' + rows.length + ' 行')
     : (rows.length + ' 行');
   const pre = $('dt-log');
+  const more = $('dt-logmore');
+  // 只渲染「最近 logLimit 行」，更早的点「加载更早」再补 —— 日志上万行时才不会卡
+  const from = Math.max(0, shown.length - logLimit);
+  const slice = shown.slice(from);
+  if (more) {
+    more.innerHTML = from > 0
+      ? '<button class="btn ghost sm" onclick="logShowMore()">加载更早的 ' + from + ' 行</button>'
+      : '';
+  }
   if (!shown.length) {
     pre.innerHTML = filtering ? '（没有匹配的日志）' : '（暂无日志）';
   } else {
-    pre.innerHTML = shown.map(r => {
+    pre.innerHTML = slice.map(r => {
       // 显示「MM-DD HH:MM:SS」，从完整时间戳里去年份；悬停仍是完整时间
       const short = r.time ? r.time.replace(/^\d{4}-/, '') : '';
       const head = r.time ? '<span class="lt" title="' + esc(r.time) + '">' + esc(short) + '</span> ' : '';
@@ -666,6 +1016,7 @@ function renderLogDates() {
 }
 function setLogDate(d) {
   detailLogDate = d || todayStr();
+  logLimit = 300;
   loadTaskDetail(true);
 }
 /* 清空全部后服务端会补一行说明，重新拉一次能看到 */
@@ -677,10 +1028,14 @@ async function reloadLogDays() {
 async function clearTaskLog(all) {
   if (!detailId) return;
   const day = detailLogDate || todayStr();
-  const msg = all
-    ? '确定清空该任务的【全部日期】日志？此操作不可恢复。'
-    : ('确定清空该任务【' + day + '】的日志？此操作不可恢复。');
-  if (!confirm(msg)) return;
+  const ok = await confirmBox({
+    title: all ? '清空全部日志' : '清理当日日志',
+    html: all
+      ? '确定清空该任务的<b>【全部日期】</b>日志？任务本身、统计与锚点不受影响。<div class="warnline">此操作不可恢复。</div>'
+      : ('确定清空该任务 <b>' + esc(day) + '</b> 这一天的日志？<div class="warnline">此操作不可恢复。</div>'),
+    okText: all ? '清空全部' : '清理当日',
+  });
+  if (!ok) return;
   try {
     await api('/api/tasks/log/clear', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -691,7 +1046,14 @@ async function clearTaskLog(all) {
   } catch (e) { toast('清理失败：' + e.message, 'err'); }
 }
 async function clearAllLogs() {
-  if (!confirm('确定清空【所有任务】的全部日志？任务本身、统计与锚点不受影响。此操作不可恢复。')) return;
+  const ok = await confirmBox({
+    title: '清空所有任务的日志',
+    html: '确定清空<b>【所有任务】</b>的全部日志？任务本身、统计与转发锚点不受影响。'
+      + '<div class="warnline">此操作不可恢复。</div>',
+    okText: '全部清空',
+    type: 'input', typeWord: 'CLEAR',
+  });
+  if (!ok) return;
   try {
     const r = await api('/api/tasks/log/clear', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -797,8 +1159,15 @@ function renderMonitorList() {
   bindTaskActions($('mt-list'), items);
 }
 async function createMonitor(asPaused) {
+  clearErrs();
   const targets = channelSelToArr('mt-targets');
-  if (!targets.length) { toast('请至少选择一个目的频道', 'err'); return; }
+  const bad = [];
+  if (!targets.length) bad.push(markErr($('mt-targets'), '请至少选择一个目的频道'));
+  const nm = ($('mt-name').value || '').trim();
+  if (nm.length > 80) bad.push(markErr($('mt-name'), '任务名称请不要超过 80 个字'));
+  const e1 = checkNum('mt-keep', 0, 3650, '日志保留天数');
+  if (e1) bad.push(e1);
+  if (bad.length) { reportBad(bad); return; }
   const btn = $('mt-create'); btn.disabled = true;
   try {
     const d = await api('/api/tasks/monitor', {
@@ -844,8 +1213,20 @@ async function renderManualRule() {
   $('mf-rule').innerHTML = html;
 }
 async function startManual() {
+  clearErrs();
   const sources = channelSelToArr('mf-sources'), targets = channelSelToArr('mf-targets');
-  if (!sources.length || !targets.length) { toast('来源频道和目的频道都要选至少一个', 'err'); return; }
+  const bad = [];
+  if (!sources.length) bad.push(markErr($('mf-sources'), '请至少选择一个来源频道'));
+  if (!targets.length) bad.push(markErr($('mf-targets'), '请至少选择一个目的频道'));
+  const er = checkRange('mf-start', 'mf-end');
+  if (er) bad.push(er);
+  const e1 = checkNum('mf-limit', 1, 10000, '扫描上限');
+  if (e1) bad.push(e1);
+  const e2 = checkNum('mf-keep', 0, 3650, '日志保留天数');
+  if (e2) bad.push(e2);
+  const nm = ($('mf-name').value || '').trim();
+  if (nm.length > 80) bad.push(markErr($('mf-name'), '任务名称请不要超过 80 个字'));
+  if (bad.length) { reportBad(bad); return; }
   const btn = $('mf-startbtn'); btn.disabled = true;
   try {
     const d = await api('/api/tasks/manual', {
@@ -1024,7 +1405,13 @@ async function wordAdd(t) {
 async function wordRemoveSel(t) {
   const words = Array.from(wordSelection[t]);
   if (!words.length) { toast('先勾选要删除的词条', 'err'); return; }
-  if (!confirm('确定从「' + GROUP_LABEL[currentScope()] + '」的' + (t === 'blocked' ? '屏蔽词' : '关键词') + '表中删除 ' + words.length + ' 个词条？')) return;
+  const ok = await confirmBox({
+    title: '删除词条',
+    html: '确定从「' + esc(GROUP_LABEL[currentScope()]) + '」的' + (t === 'blocked' ? '屏蔽词' : '关键词')
+      + '表中删除 <b>' + words.length + '</b> 个词条？',
+    okText: '删除',
+  });
+  if (!ok) return;
   try {
     await api('/api/words', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: t, scope: currentScope(), action: 'remove', words }) });
     wordSelection[t] = new Set();
@@ -1104,5 +1491,9 @@ async function batchAction(t) {
 }
 
 /* ================= 启动 ================= */
+(function bindStaticUI() {
+  const cancel = $('cf-cancel');
+  if (cancel) cancel.onclick = () => cfClose(false);
+})();
 showView('dashboard');
 setInterval(() => { if ($('view-dashboard').classList.contains('active')) loadStats(); }, 8000);

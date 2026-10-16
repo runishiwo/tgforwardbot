@@ -1,3 +1,6 @@
 telethon>=1.40,<2.0
 aiohttp>=3.8,<4.0
 PyYAML>=6.0
+# AES-IGE 的 C 实现（Telethon 自动优先使用）。不装也能跑，但会退化成纯 Python
+# 的 pyaes，大媒体上传/下载的 CPU 占用高一个数量级。Windows 无预编译 wheel，已用标记跳过。
+cryptg>=0.4.0; sys_platform != "win32"

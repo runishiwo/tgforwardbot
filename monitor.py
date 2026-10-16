@@ -37,6 +37,7 @@ class MonitorTask:
         self._stopped = True
         self.seen = collections.OrderedDict()
         self._pending_ids = []       # 已入队但还没汇总记日志的消息 id
+        self._seen_groups = set()    # 已入队的相册 grouped_id（整组发送覆盖全组，后续成员跳过）
         self._dests = None
         self.apply_config()
 
@@ -182,8 +183,26 @@ class MonitorTask:
             self.bot.stats.inc('skipped', scope=_SCOPE)
             self.log('消息 %s 已在任务内处理过，跳过' % message.id, TAG_SKIP)
             return
+        # 相册去重：同一 grouped_id 只入队第一次。deliver 对相册是**整组发送**，
+        # 后续成员再入队只会把整组重复发几遍；整组发送成功后锚点会推进全组。
+        gid = getattr(message, 'grouped_id', None)
+        if gid is not None:
+            if gid in self._seen_groups:
+                self.store.stats_add(self.record, 'skipped')
+                self.bot.stats.inc('skipped', scope=_SCOPE)
+                self.log('消息 %s 属相册 %s（同组已入队，整组发送时覆盖），跳过'
+                         % (message.id, gid), TAG_SKIP)
+                return
+            self._seen_groups.add(gid)
         await self.queue.put((chat, message))
         self._pending_ids.append(message.id)   # 汇总成一行「进入队列」日志
+
+    def _on_group_sent(self, chat_id, gid, ids):
+        """相册整组发送成功：清组去重标记 + 把全组 id 推进锚点（防断线补扫重发）。"""
+        self._seen_groups.discard(gid)
+        if self.anchor_on:
+            for mid in ids:
+                self.bot.anchors.advance(self.id, chat_id, mid)
 
     async def _run(self):
         while not self._stopped:
@@ -199,8 +218,13 @@ class MonitorTask:
                 # 与手动转发一致：网络抖动 / 被限流时**一直重试**（退避最长 60 秒），
                 # 不因几次失败就把消息丢掉。停用任务时会直接取消 worker，不会卡住。
                 ok = await self.bot.deliver(chat, message, dests, log=self.log,
-                                            retry_forever=True)
-                if ok:
+                                            retry_forever=True,
+                                            on_sent=lambda ids, gid: self._on_group_sent(
+                                                self.bot.peer_id(chat), gid, ids))
+                if ok == 'empty':
+                    # 服务消息 / 空消息：无内容可转，跳过（不算成功也不算失败）
+                    self.log('消息 %s 无文字也无媒体（服务消息），跳过' % message.id, TAG_SKIP)
+                elif ok:
                     self.store.stats_add(self.record, 'sent')
                     self.bot.stats.inc('forwarded', scope=_SCOPE)
                     self.bot.last_forward_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')

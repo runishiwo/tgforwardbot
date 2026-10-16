@@ -170,6 +170,9 @@ sudo TG_API_ID=123456 \
 # 1. 依赖
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
+# requirements.txt 已包含 cryptg（AES-IGE 的 C 实现，Telethon 会自动优先使用）。
+# 它能大幅降低大媒体上传/下载时的 CPU 占用；不装也能运行，但会退化成纯 Python 实现。
+# Windows 无预编译 wheel，已用环境标记自动跳过。
 
 # 2. 配置
 cp config.example.yml config.yml
@@ -220,6 +223,8 @@ sudo bash uninstall.sh --purge    # 连同安装目录一起删除
 | `forward_interval`                              | 转发消息间隔（秒）                          |
 | `max_retries`                                   | 转发失败重试次数（手动/实时任务实际为无限重试，此项仅作保底）    |
 | `media_timeout`                                 | 单个媒体下载 / 上传超时（秒，默认 900；大文件或慢网络可调大） |
+| `transfer_concurrency`                          | 大媒体下载 / 上传的并发分片数（默认 16；Telegram 对单文件有服务端限速，调很大提升有限） |
+| `retry_limit`                                   | 无限重试模式下单条连续失败这么多次就放弃、记入待补发（默认 30；0 = 真正无限） |
 | `album_scan_limit`                              | 相册/媒体组扫描深度                         |
 | `log_cleanup_interval`                          | 过期日志清理间隔（秒）                        |
 | `log_dir` / `media_tmp_dir`                     | 日志 / 媒体临时目录                        |

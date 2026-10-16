@@ -133,6 +133,8 @@ forward_interval: 2
 max_retries: 3
 album_scan_limit: 50
 media_timeout: 900
+transfer_concurrency: 16
+retry_limit: 30
 log_cleanup_interval: 21600
 log_dir: "log"
 media_tmp_dir: "media_tmp"

@@ -2,17 +2,24 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0a0c1c">
+<meta name="color-scheme" content="dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>TG 转发机器人 · 控制台</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%2331cef6'/%3E%3Cpath d='M13 21h38' stroke='%230a0c1c' stroke-width='7' stroke-linecap='round'/%3E%3Cpath d='M32 21v15' stroke='%230a0c1c' stroke-width='7' stroke-linecap='round'/%3E%3Cpath d='M24 33l8 8 8-8' fill='none' stroke='%230a0c1c' stroke-width='7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/fonts/misans.css">
 <link rel="stylesheet" href="/admin.css">
 </head>
 <body>
+<div id="pgbar"></div>
 <div class="app">
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
     <div class="brand">
       <div class="logo">TG</div>
-      <div><b>转发机器人</b><small>实时监控 · 手动转发</small></div>
+      <div class="brand-txt"><b>转发机器人</b><small>实时监控 · 手动转发</small></div>
+      <button type="button" class="nav-close" id="nav-close" aria-label="收起菜单">&times;</button>
     </div>
     <div class="nstatus"><span class="dot" id="conn-dot"></span><span id="conn-text">连接状态…</span></div>
 
@@ -48,10 +55,14 @@
       <a class="btn ghost sm" href="/logout">退出登录</a>
     </div>
   </aside>
+  <div id="nav-mask"></div>
 
   <main>
     <div class="head">
-      <div>
+      <button type="button" class="nav-toggle" id="nav-toggle" aria-label="打开菜单" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
+      <div class="head-main">
         <div class="crumb" id="crumb"></div>
         <h1 id="page-title">概览</h1>
         <div class="sub" id="page-sub"></div>

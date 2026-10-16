@@ -227,6 +227,85 @@ class ManualForward:
         except Exception:
             pass
 
+    def _queue_iter(self, task_id):
+        """流式逐行读队列文件（不整份读进内存，百万条也不占 RAM）。"""
+        try:
+            with open(self._queue_path(task_id), 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(item, list) and len(item) == 2:
+                        yield (item[0], item[1])
+        except FileNotFoundError:
+            return
+
+    def _queue_count(self, task_id):
+        n = 0
+        for _ in self._queue_iter(task_id):
+            n += 1
+        return n
+
+    # ---------------- 待补发清单 ----------------
+    # 转发最终失败（超过重试上限）的条目记到 <id>.retry，任务跑完后自动补发几轮；
+    # 仍失败的保留在文件里，日志里能看到，之后「恢复 / 重新开始」会再处理。
+    def _retry_path(self, task_id):
+        return os.path.join(BASE_DIR, 'log', 'tasks', '%s.retry' % task_id)
+
+    def _retry_append(self, task_id, chat_id, mid):
+        path = self._retry_path(task_id)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps([chat_id, mid]) + '\n')
+        except Exception as exc:
+            print_ts('待补发清单落盘失败 %s: %s' % (task_id, exc))
+
+    def _retry_read(self, task_id):
+        out = []
+        try:
+            with open(self._retry_path(task_id), 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(item, list) and len(item) == 2:
+                        out.append((item[0], item[1]))
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            print_ts('读取待补发清单失败 %s: %s' % (task_id, exc))
+        return out
+
+    def _retry_count(self, task_id):
+        return len(self._retry_read(task_id))
+
+    def _retry_remove(self, task_id, chat_id, mid):
+        items = [x for x in self._retry_read(task_id) if list(x) != [chat_id, mid]]
+        path = self._retry_path(task_id)
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                for x in items:
+                    f.write(json.dumps(list(x)) + '\n')
+        except Exception as exc:
+            print_ts('更新待补发清单失败 %s: %s' % (task_id, exc))
+
+    def _retry_drop(self, task_id):
+        try:
+            os.remove(self._retry_path(task_id))
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
     def progress_of(self, task_id):
         """该任务已保存的续跑断点（没有则返回空 dict）。"""
         record = self.store.get(task_id)
@@ -307,6 +386,7 @@ class ManualForward:
         cfg = record.get('config') or {}
         if not resume:
             self._queue_drop(record['id'])
+            self._retry_drop(record['id'])
             cfg.pop('progress', None)
         # 无论哪种方式启动，都先把「自动恢复」标记清掉——已经跑起来了，
         # 之后若再次被关闭，会在 _run 的收尾逻辑里按当时的情况重新决定是否打标记。
@@ -645,6 +725,63 @@ class ManualForward:
                 await self._wait_if_paused(record)
                 await asyncio.sleep(delay)
 
+    async def _backfill(self, record, dests, chat_by_id, anchor_on, dest_label, rounds=3):
+        """把本轮转发失败（记入 `<id>.retry`）的条目再补发几轮。
+
+        每轮之间隔 30 秒；成功的条目即时从清单移除。跑完仍失败的保留在文件里，
+        日志会说明，之后点「恢复」或「重新开始」会再处理。
+        """
+        task_id = record['id']
+        for round_no in range(1, rounds + 1):
+            items = self._retry_read(task_id)
+            if not items:
+                return
+            await self._event(record, '待补发 %d 条，开始第 %d/%d 轮补发'
+                              % (len(items), round_no, rounds))
+            for cid, mid in items:
+                await self._wait_if_paused(record)
+                chat = chat_by_id.get(cid)
+                if chat is None:
+                    self._retry_remove(task_id, cid, mid)
+                    continue
+                message = await self._fetch_message(record, chat, mid)
+                if message is None:
+                    self._retry_remove(task_id, cid, mid)
+                    await self._event(record, '消息 %s 已不可用，从待补发清单移除' % mid, TAG_SKIP)
+                    continue
+                ok = await self.bot.deliver(
+                    chat, message, dests,
+                    log=lambda s, tag=None: self.log.append(task_id, s, tag=tag),
+                    retry_forever=True,
+                    on_sent=lambda ids, gid: None,
+                    gate=lambda: self._wait_if_paused(record),
+                    lock=self._send_lock)
+                if ok and ok != 'empty':
+                    record['stats']['sent'] += 1
+                    self.bot.stats.inc('forwarded', scope=_SCOPE)
+                    self.bot.last_forward_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    if anchor_on:
+                        self.bot.anchors.advance(task_id, self.bot.peer_id(chat), mid)
+                    if ok == 'download':
+                        how, tag = '补发 · 下载后转发成功', TAG_OK_DOWNLOAD
+                    else:
+                        how, tag = '补发 · 转发成功', TAG_OK_DIRECT
+                    await self._event(record, '消息 %s %s → %s（%s）' % (
+                        mid, how, dest_label, getattr(chat, 'title', chat.id)), tag)
+                    self._retry_remove(task_id, cid, mid)
+                elif ok == 'empty':
+                    self._retry_remove(task_id, cid, mid)
+                else:
+                    await self._event(record, '消息 %s 补发第 %d 轮仍失败' % (mid, round_no),
+                                      TAG_FAIL)
+                self.store.save(record)
+                await asyncio.sleep(self.bot.forward_interval)
+            await asyncio.sleep(30)
+        left = self._retry_count(task_id)
+        if left:
+            await self._event(record, '补发结束：仍有 %d 条未成功，已保留在待补发清单；'
+                                      '之后点「恢复」或「重新开始」会再处理' % left)
+
     async def _run(self, record, chats, dests, start, end, kw_feed, bl_feed, filter_on,
                    bl_on, limit, use_global=True, resume=False):
         task_id = record['id']
@@ -657,21 +794,23 @@ class ManualForward:
         stage = 'scan'
         src_from = 0
         pos_done = 0
-        queue = []                       # 阶段一收集：[(来源频道 id, message_id)]
+        # 阶段一收集的条目**只写队列文件**（逐条落盘），内存里仅保留计数：
+        # 大频道一次扫上百万条也不会把内存吃光（容器总共才 2GB）。
+        queued = 0
+        seen_groups = set()           # 本次扫描已入队的相册 grouped_id（同组只入队第一条）
         usable_break = False             # 是否真的读到了可用的断点（否则就是从零重扫）
         if resume:
-            queue = self._queue_read(task_id)
             stage = progress.get('stage') if progress.get('stage') in ('scan', 'forward') else 'scan'
             src_from = max(0, int(progress.get('src') or 0))
             pos_done = max(0, int(progress.get('pos') or 0))
-            if not queue and stage == 'forward':
+            queued = self._queue_count(task_id)
+            if not queued and stage == 'forward':
                 stage, src_from, pos_done = 'scan', 0, 0     # 队列文件没了，只能退回重扫
             if stage == 'scan':
                 pos_done = 0
-                usable_break = bool(queue) or src_from > 0 or bool(progress.get('anchor'))
+                usable_break = queued > 0 or src_from > 0 or bool(progress.get('anchor'))
             else:
                 usable_break = True
-        seen = set(queue)                # 续扫时预填：已入队的消息就不会被重复追加
         anchor_skipped = 0
         skipped_other = 0
         try:
@@ -680,20 +819,23 @@ class ManualForward:
                 # 「转发成功/失败」是每条消息的真实结果、重扫时被锚点跳过不会重算，所以保留。
                 for key in ('checked', 'matched', 'skipped'):
                     record['stats'][key] = 0
+                # 队列文件里若有旧残留，从零重扫前先丢掉，避免重复入队
+                self._queue_drop(task_id)
+                queued = 0
                 await self._event(record, '没有可用断点，从零重新扫描；本任务的「已扫描/命中/跳过」已归零'
                                           '（不叠加，转发成功/失败计数保留），已转发过的消息会按锚点自动跳过')
             if resume and stage == 'forward':
                 # ---------- 续跑：队列还在，直接接着转发，完全跳过扫描 ----------
                 record['config']['phase'] = 'forwarding'
                 await self._event(record, '从断点继续：队列共 %d 条，已完成 %d 条，'
-                                          '直接接着转发（不重新扫描）' % (len(queue), pos_done))
+                                          '直接接着转发（不重新扫描）' % (queued, pos_done))
             else:
                 # ---------- 阶段一：全量扫描，只收集入队，一条都不发 ----------
                 record['config']['phase'] = 'scanning'
-                record['stats']['queued'] = len(queue)
-                if resume and queue:
+                record['stats']['queued'] = queued
+                if resume and queued:
                     await self._event(record, '从断点继续扫描：队列已有 %d 条，从第 %d 个来源接着扫'
-                                      % (len(queue), min(src_from + 1, len(chats))))
+                                      % (queued, min(src_from + 1, len(chats))))
                 await self._event(record, '开始扫描（此阶段只收集待转发消息，暂不发送）')
                 for si in range(src_from, len(chats)):
                     chat = chats[si]
@@ -701,7 +843,8 @@ class ManualForward:
                     title = getattr(chat, 'title', str(chat_id))
                     record['config']['current_source'] = title
                     await self._event(record, '开始扫描：%s' % title)
-                    seg_ids = []                # 本频道这次入队的消息 id，扫完只汇总成一行日志
+                    seg_ids = []                # 本频道这次入队的消息 id（只留少量供日志汇总）
+                    seg_count = 0
                     # 从「起始时间」往后扫（旧 → 新）：先按起始时间定位锚点，再从锚点之后正向遍历。
                     # 续扫时当前来源直接用上次存下的断点 id（没有起始时间时也一样），不回退重扫。
                     if si == src_from and progress.get('anchor'):
@@ -727,11 +870,6 @@ class ManualForward:
                             break
                         if start and message.date < start:
                             continue
-                        key = (chat_id, message.id)
-                        if key in seen:
-                            record['stats']['skipped'] += 1
-                            continue
-                        seen.add(key)
                         if anchor_on and self.bot.anchors.seen(task_id, chat_id, message.id, use_global):
                             record['stats']['skipped'] += 1
                             self.bot.stats.inc('skipped', scope=_SCOPE)
@@ -764,26 +902,47 @@ class ManualForward:
                                 await self._event(record, '消息 %s 来源是目标频道，跳过' % message.id,
                                                   TAG_SKIP)
                             continue
-                        queue.append((chat_id, message.id))
-                        self._queue_append(task_id, chat_id, message.id)   # 逐条落盘，断点续跑用
-                        seg_ids.append(message.id)
-                        record['stats']['queued'] = len(queue)
-                        if len(queue) % 20 == 0:
+                        if not self.bot._has_content(message):
+                            # 服务消息（频道创建/置顶…）与空消息：无内容可转，不入队
+                            record['stats']['skipped'] += 1
+                            self.bot.stats.inc('skipped', scope=_SCOPE)
+                            skipped_other += 1
+                            if skipped_other <= 20:
+                                await self._event(record, '消息 %s 无文字也无媒体（服务消息），跳过'
+                                                  % message.id, TAG_SKIP)
+                            continue
+                        gid = getattr(message, 'grouped_id', None)
+                        if gid is not None:
+                            # 相册只入队第一条：转发时 deliver 会整组发送（含本条后面
+                            # 的各条成员），后续成员再入队只会把整组重复发几遍。
+                            if gid in seen_groups:
+                                continue
+                            seen_groups.add(gid)
+                        # 只落盘、不进内存：断点续跑与转发阶段都从队列文件流式读
+                        self._queue_append(task_id, chat_id, message.id)
+                        queued += 1
+                        seg_count += 1
+                        if len(seg_ids) < 200:
+                            seg_ids.append(message.id)
+                        record['stats']['queued'] = queued
+                        if queued % 20 == 0:
                             self.store.save(record)
-                    if seg_ids:                                       # 入队只汇总一行，不逐条刷屏
-                        await self._event(record, '%s 进入队列（待转发 %d 条）'
-                                          % (id_range_text(seg_ids), len(seg_ids)))
+                    if seg_count:                                    # 入队只汇总一行，不逐条刷屏
+                        more = '' if seg_count == len(seg_ids) else (' 等 %d 条' % seg_count)
+                        await self._event(record, '%s%s 进入队列（本频道入队 %d 条，累计待转发 %d 条）'
+                                          % (id_range_text(seg_ids), more, seg_count, queued))
                     record['config']['sources_done'] = record['config'].get('sources_done', 0) + 1
                     self.store.save(record)
 
                 # 阶段一扫完（或本来就在转发阶段）→ 记下阶段二断点，之后按「队列第几条」续跑
                 progress['stage'] = 'forward'
                 progress['pos'] = pos_done
+                progress['queued_total'] = queued
                 progress.pop('src', None)
                 progress.pop('anchor', None)
 
-            # ---------- 阶段二：从队列里逐条取出发送 ----------
-            total = len(queue)
+            # ---------- 阶段二：从队列文件里逐条取出发送（流式读，不占内存） ----------
+            total = int(progress.get('queued_total') or 0) or self._queue_count(task_id)
             self.store.save(record)
             record['config']['phase'] = 'forwarding'
             record['config']['current_source'] = ''
@@ -797,7 +956,7 @@ class ManualForward:
                                   % (anchor_skipped + skipped_other))
             sent_ok = 0
             dest_label = self._dest_label(record, dests)
-            for index, (cid, mid) in enumerate(queue, 1):
+            for index, (cid, mid) in enumerate(self._queue_iter(task_id), 1):
                 if index <= pos_done:                    # 续跑：这些上次已经处理过了
                     continue
                 chat = chat_by_id.get(cid)
@@ -818,19 +977,31 @@ class ManualForward:
                     await self._event(record, '消息 %s 已不可用（可能已删除），跳过' % mid, TAG_FAIL)
                 else:
                     await self._event(record, '消息 %s 开始转发（%d/%d）' % (mid, index, total))
+                    group_ids = []       # 相册整组发送成功后回调填进来的本组全部 id
                     ok = await self.bot.deliver(
                         chat, message, dests,
                         log=lambda s, tag=None: self.log.append(task_id, s, tag=tag),
                         retry_forever=True,
+                        on_sent=lambda ids, gid: group_ids.extend(ids),
                         gate=lambda: self._wait_if_paused(record),
                         lock=self._send_lock)
-                    if ok:
+                    if ok == 'empty':
+                        # 服务消息 / 空消息：无内容可转。不算成功也不算失败，跳过即可
+                        record['stats']['skipped'] += 1
+                        self.bot.stats.inc('skipped', scope=_SCOPE)
+                        skipped_other += 1
+                        await self._event(record, '消息 %s 无文字也无媒体（服务消息），跳过' % mid,
+                                          TAG_SKIP)
+                    elif ok:
                         sent_ok += 1
                         record['stats']['sent'] += 1
                         self.bot.stats.inc('forwarded', scope=_SCOPE)
                         self.bot.last_forward_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         if anchor_on:
                             self.bot.anchors.advance(task_id, self.bot.peer_id(chat), mid)
+                            # 相册：把同组其它成员也推进锚点，断线补扫/续跑时不会重发
+                            for gid_mid in group_ids:
+                                self.bot.anchors.advance(task_id, self.bot.peer_id(chat), gid_mid)
                         # 按实际转发路径分两类日志：直接转发 / 下载后转发（见 bot.deliver 返回值）
                         if ok == 'download':
                             how, tag = '下载后转发成功', TAG_OK_DOWNLOAD
@@ -842,10 +1013,15 @@ class ManualForward:
                     else:
                         record['stats']['failed'] += 1
                         self.bot.stats.inc('failed', scope=_SCOPE)
+                        # 记入待补发清单：任务跑完后自动补发几轮，仍失败的保留可手动恢复
+                        self._retry_append(task_id, cid, mid)
+                        await self._event(record, '消息 %s 转发失败，已记入待补发清单' % mid, TAG_FAIL)
                 record['stats']['queued'] = max(0, total - index)
                 progress['pos'] = index               # 断点：本条已处理完，恢复时从这里之后继续
                 self.store.save(record)
                 await asyncio.sleep(self.bot.forward_interval)
+            # ---------- 阶段三：把本轮失败的条目自动补发几轮，再算任务完成 ----------
+            await self._backfill(record, dests, chat_by_id, anchor_on, dest_label)
             record['state'] = 'done'
             record['config']['phase'] = ''
             record['config']['current_source'] = ''
@@ -863,7 +1039,8 @@ class ManualForward:
                 record['config']['phase'] = ''
                 if not was_paused:
                     record['config']['auto_resume'] = True
-                record['stats']['queued'] = max(0, len(queue) - int(progress.get('pos') or 0))
+                record['stats']['queued'] = max(0, self._queue_count(task_id)
+                                                - int(progress.get('pos') or 0))
                 await self._event(record, '服务关闭，任务已停止（断点已保留%s）' % (
                     '，重启后会自动恢复' if not was_paused else '，等待手动恢复'))
             else:

@@ -7,7 +7,7 @@
             <b>实时监控</b>
             <p>多条监控任务并行：每条任务自己选来源频道、目的频道与词表，命中即转发。</p>
             <div class="cnt" id="cat-monitor-cnt">—</div>
-            <div class="cb"><span>实时任务</span><span>词表管理</span></div>
+            <div class="cb"><button type="button" data-go="monitor">实时任务</button><button type="button" data-go="words">词表管理</button><button type="button" data-go="tasks">任务中心</button></div>
           </div>
         </div>
         <div class="cat-card manual" data-group="manual" onclick="enterCategory('manual')">
@@ -16,7 +16,7 @@
             <b>手动转发</b>
             <p>按频道 + 时间范围补转历史消息，多条任务同时跑，每条任务独立日志。</p>
             <div class="cnt" id="cat-manual-cnt">—</div>
-            <div class="cb"><span>发起转发</span><span>词表管理</span><span>任务中心</span></div>
+            <div class="cb"><button type="button" data-go="manual">发起转发</button><button type="button" data-go="words">词表管理</button><button type="button" data-go="tasks">任务中心</button></div>
           </div>
         </div>
       </div>
